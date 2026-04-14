@@ -1,0 +1,21 @@
+# secrets & local env
+.env
+
+# project-local binaries and models (fetched by scripts/setup.ps1)
+vendor/
+models/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# node
+node_modules/
+frontend/dist/
+
+# rust / tauri
+frontend/src-tauri/target/
+
+# logs & scratch
+*.log
