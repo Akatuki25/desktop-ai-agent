@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://desktop-ai-agent.dev/rpc/schema.json",
+  "title": "desktop-ai-agent RPC",
+  "description": "JSON-RPC 2.0 contract between Tauri frontend and Python daemon. Phase 0 covers only session.send_text and agent.say/agent.say_end; methods for voice, tool confirmation, settings, scheduler, memory and llm diagnostics will be added as each phase lands. See docs/spec-detailed.md §5 for the full surface.",
+  "version": "0.0.0",
+  "transport": {
+    "scheme": "ws",
+    "host": "127.0.0.1",
+    "path": "/ws",
+    "auth": {
+      "scheme": "bearer-subprotocol",
+      "description": "Client sets Sec-WebSocket-Protocol to 'bearer.<token>'. The daemon also accepts an Authorization: Bearer <token> header when the caller can set one."
+    },
+    "framing": {
+      "text": "JSON-RPC 2.0 envelope",
+      "binary": {
+        "description": "Reserved for audio streams; first byte is a tag (0x01=mic PCM, 0x02=tts PCM), followed by a u64 LE sequence number, followed by payload.",
+        "tags": {
+          "mic": 1,
+          "tts": 2
+        }
+      }
+    }
+  },
+  "methods": {
+    "session.send_text": {
+      "direction": "client->daemon",
+      "params": {
+        "type": "object",
+        "required": ["text"],
+        "additionalProperties": false,
+        "properties": {
+          "text": { "type": "string", "minLength": 1 }
+        }
+      },
+      "result": {
+        "type": "object",
+        "required": ["ok"],
+        "properties": {
+          "ok": { "type": "boolean" }
+        }
+      }
+    }
+  },
+  "events": {
+    "agent.say": {
+      "direction": "daemon->client",
+      "description": "Streaming chunk of agent speech. Emotion is used by the character feature to pick a sprite. is_thinking=true marks chunks that should render in the bubble's thinking layer, not the main text.",
+      "params": {
+        "type": "object",
+        "required": ["text", "emotion", "is_thinking"],
+        "additionalProperties": false,
+        "properties": {
+          "text": { "type": "string" },
+          "emotion": {
+            "type": "string",
+            "enum": ["neutral", "smile", "think", "surprise", "sad", "angry"]
+          },
+          "is_thinking": { "type": "boolean" },
+          "delta": { "type": "boolean", "default": false }
+        }
+      }
+    },
+    "agent.say_end": {
+      "direction": "daemon->client",
+      "description": "Marks the end of one turn's stream. Subsequent agent.say events belong to a new message.",
+      "params": {
+        "type": "object",
+        "required": ["message_id"],
+        "additionalProperties": false,
+        "properties": {
+          "message_id": { "type": "string" }
+        }
+      }
+    }
+  }
+}

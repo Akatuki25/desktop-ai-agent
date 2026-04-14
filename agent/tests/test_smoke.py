@@ -21,15 +21,16 @@ def test_healthz(client: TestClient) -> None:
 
 
 def test_ws_requires_bearer_token(client: TestClient) -> None:
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/ws"):
-            pass
+    with pytest.raises(WebSocketDisconnect), client.websocket_connect("/ws"):
+        pass
 
 
 def test_ws_rejects_wrong_token(client: TestClient) -> None:
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/ws", headers={"authorization": "Bearer wrong"}):
-            pass
+    with (
+        pytest.raises(WebSocketDisconnect),
+        client.websocket_connect("/ws", headers={"authorization": "Bearer wrong"}),
+    ):
+        pass
 
 
 def test_ws_echoes_send_text(client: TestClient) -> None:
