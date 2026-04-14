@@ -1,291 +1,183 @@
 # 環境構築 (Windows)
 
-Windows 10/11 を対象とした開発環境のセットアップ手順。**root (システム全体) を極力汚さない** ことを原則とする。
+Windows 10/11 向け。**root を最大限汚さない** 方針で、自動化できる部分は `scripts/setup.ps1` 1 本にまとめてある。
 
-## 原則
-- 管理者権限が必須なのは **Visual Studio Build Tools** のみ (Rust のリンカ依存、回避不可)
-- それ以外は全て **per-user (`%USERPROFILE%` 配下)** または **プロジェクトローカル (`repo/` 配下)** に閉じ込める
-- PATH 改変はユーザー環境変数のみ、システム PATH は触らない
-- モデル・ブラウザ・外部バイナリは全て `vendor/` と `models/` にダウンロードし、repo を消せば痕跡が残らない状態を目指す
-- API キー等の秘密は `.env` に置き、`.env.example` をコミット
+## TL;DR
 
-## 全体像
+```powershell
+# 1. 前提: Git と VS Build Tools を入れる (詳細は下の「前提」セクション)
+# 2. clone してセットアップ実行
+git clone git@github.com:Akatuki25/desktop-ai-agent.git
+cd desktop-ai-agent
+.\scripts\setup.ps1
 
-| 層 | 配置 | 汚染範囲 |
-|----|------|---------|
-| Visual Studio Build Tools | `C:\Program Files\...` | **system** (不可避) |
-| rustup / cargo | `%USERPROFILE%\.rustup`, `.cargo` | user |
-| fnm (Node manager) | `%USERPROFILE%\AppData\Local\fnm` | user |
-| uv (Python manager) | `%USERPROFILE%\.local\bin` | user |
-| Python venv | `./.venv/` | project |
-| Node modules | `./frontend/node_modules/` | project |
-| llama.cpp 実行バイナリ | `./vendor/llama.cpp/` | project |
-| Qwen3 GGUF モデル | `./models/` | project |
-| Playwright Chromium | `./vendor/playwright-browsers/` | project |
-| VOICEVOX エンジン | `./vendor/voicevox/` | project |
-| DB / logs / browser profile | `%APPDATA%/desktop-ai-agent/` | user (実行時) |
+# 3. .env にシークレットを書く
+notepad .env
+
+# 4. 起動
+. .\scripts\activate.ps1
+cd frontend
+pnpm tauri dev
+```
+
+以上。初回は llama.cpp / モデル / Chromium / VOICEVOX のダウンロードで数 GB / 数十分かかる。2 回目以降の `setup.ps1` は既に入っているものを skip するので数秒で終わる。
 
 ---
 
-## 1. 前提 (一度だけ、手動)
+## 前提 (手動、一度だけ)
 
-### 1.1 Git for Windows
-[git-scm.com](https://git-scm.com/download/win) からインストーラー。既に入っていればスキップ。
+`setup.ps1` は以下**だけは入れてくれない**。`setup.ps1` を走らせる前に用意する。
 
-### 1.2 Visual Studio Build Tools 2022
-Tauri/Rust が MSVC リンカを要求するため必須。
-
+### 1. Git for Windows
 ```powershell
-winget install --id Microsoft.VisualStudio.2022.BuildTools -e `
-  --override "--wait --passive --add Microsoft.VisualCppBuildTools --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+winget install --id Git.Git -e
 ```
 
-または手動で installer を落とし、**"Desktop development with C++"** ワークロードを選択。
+### 2. Visual Studio Build Tools 2022 (C++ workload) ← **唯一 root を汚す**
+Rust/Tauri のリンカ依存で、これだけは代替不可。
+```powershell
+winget install --id Microsoft.VisualStudio.2022.BuildTools -e --override `
+  "--wait --passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"
+```
 
-**ここだけ root を汚す。** 他に代替は無い。
-
-### 1.3 WebView2 Runtime
-Windows 11 は標準搭載。10 の場合のみ:
+### 3. WebView2 Runtime (Windows 10 のみ)
+Windows 11 は標準搭載なのでスキップ。
 ```powershell
 winget install --id Microsoft.EdgeWebView2Runtime -e
 ```
 
 ---
 
-## 2. per-user ツール (管理者不要)
+## `setup.ps1` が何をするか
 
-以下は全て `%USERPROFILE%` 配下にインストールされ、root を汚さない。
+`setup.ps1` は以下を順に実行する。全て冪等 (既に入っていれば skip)。
 
-### 2.1 rustup (Rust toolchain)
+| ステップ | 配置先 | 汚染範囲 |
+|---------|--------|---------|
+| rustup (+ stable Rust toolchain) | `%USERPROFILE%\.rustup`, `.cargo` | per-user |
+| fnm (Node version manager) | `%LOCALAPPDATA%\fnm` | per-user |
+| uv (Python manager、Python本体含む) | `%USERPROFILE%\.local\bin` 他 | per-user |
+| Node + pnpm (`fnm use` + `corepack enable`) | fnm 配下 | per-user |
+| frontend deps (`pnpm install`) | `./frontend/node_modules/` | project |
+| agent deps (`uv sync`) | `./.venv/` または `./agent/.venv/` | project |
+| llama.cpp prebuilt | `./vendor/llama.cpp/` | project |
+| Qwen3 8B GGUF モデル | `./models/` | project |
+| Playwright Chromium (cache を repo に向ける) | `./vendor/playwright-browsers/` | project |
+| VOICEVOX エンジン portable | `./vendor/voicevox/` | project |
+| `.env` scaffold | `./.env` (`.env.example` から) | project |
+
+**システム全体に残るのは VS Build Tools だけ**、それ以外は per-user か repo 内。repo を消せば project 列は全て消滅する。
+
+### フラグ
 ```powershell
-# 公式 installer を user scope で実行
-Invoke-WebRequest https://win.rustup.rs/x86_64 -OutFile $env:TEMP\rustup-init.exe
-& $env:TEMP\rustup-init.exe -y --default-toolchain stable --profile minimal
+.\scripts\setup.ps1 -SkipToolchain   # rustup/fnm/uv は既に入っている場合
+.\scripts\setup.ps1 -SkipModel       # 5GB の GGUF を後回しにする
+.\scripts\setup.ps1 -SkipVoicevox    # 音声を使わない
 ```
-インストール先: `%USERPROFILE%\.rustup`, `%USERPROFILE%\.cargo`。PATH はユーザー環境変数にのみ追加される。
 
-### 2.2 fnm (Node.js version manager)
+### 7-Zip について
+VOICEVOX の配布物は `.7z`。setup.ps1 は 7-Zip を見つけられないと voicevox 展開だけ warn で skip する。必要なら:
 ```powershell
-winget install Schniz.fnm -e
-# 現シェルで有効化 + 自動 activation を profile に追加
-fnm env --use-on-cd | Out-String | Invoke-Expression
-Add-Content $PROFILE 'fnm env --use-on-cd | Out-String | Invoke-Expression'
+winget install --id 7zip.7zip -e
+.\scripts\setup.ps1           # 7z 検出後に再実行
 ```
-`fnm` は `%LOCALAPPDATA%\fnm` に入り、Node 自体も per-user。
-
-### 2.3 uv (Python package & project manager)
-```powershell
-# 公式 standalone installer (user scope、root 変更なし)
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-```
-インストール先: `%USERPROFILE%\.local\bin\uv.exe`。uv は Python 本体も自前で管理するので、システム Python を入れる必要はない。
 
 ---
 
-## 3. リポジトリ初期化
+## 起動
 
+### 開発モード
 ```powershell
-git clone git@github.com:Akatuki25/desktop-ai-agent.git
-cd desktop-ai-agent
-```
-
-### 3.1 Node バージョン固定
-```powershell
-# .node-version を読んで必要な Node を fnm が自動取得
-fnm use --install-if-missing
-corepack enable        # pnpm を有効化 (Node 同梱機能)
-```
-`corepack enable` は Node インストール先にのみ影響し、system には触らない。
-
-### 3.2 frontend 依存
-```powershell
+. .\scripts\activate.ps1      # 環境変数を Process scope でセット
 cd frontend
-pnpm install
-cd ..
+pnpm tauri dev                # Tauri が agent daemon を spawn、daemon が llama-server を spawn
 ```
+初回は Rust ビルドで数分。2 回目以降はインクリメンタル。
 
-### 3.3 Python 環境 (agent)
+### daemon だけ (デバッグ用)
 ```powershell
-cd agent
-uv sync                # .venv を作って pyproject.toml から依存解決
-cd ..
-```
-Python 本体が無ければ uv が `pyproject.toml` の `requires-python` を見て自動で落とし、`%USERPROFILE%\.local\share\uv\python` 配下に配置する。
-
----
-
-## 4. プロジェクトローカルのバイナリ/モデル取得
-
-全て repo 配下に閉じ込める。初回のみ数 GB ダウンロードが発生。
-
-### 4.1 llama.cpp (prebuilt)
-```powershell
-# CUDA 版 or CPU 版を選ぶ (下は CPU 版例、GPU なら cudart を足す)
-$ver = "b4000"   # scripts/versions.ps1 で固定管理
-$url = "https://github.com/ggml-org/llama.cpp/releases/download/$ver/llama-$ver-bin-win-avx2-x64.zip"
-New-Item -ItemType Directory -Force vendor\llama.cpp | Out-Null
-Invoke-WebRequest $url -OutFile vendor\llama.cpp.zip
-Expand-Archive vendor\llama.cpp.zip -DestinationPath vendor\llama.cpp -Force
-Remove-Item vendor\llama.cpp.zip
-```
-`vendor\llama.cpp\llama-server.exe` が使えるようになる。アンインストールは `vendor\llama.cpp\` を消すだけ。
-
-### 4.2 Qwen3 8B GGUF モデル
-```powershell
-New-Item -ItemType Directory -Force models | Out-Null
-# 量子化は Q4_K_M が速度/品質バランス良
-$model = "Qwen3-8B-Instruct-Q4_K_M.gguf"
-Invoke-WebRequest "https://huggingface.co/Qwen/Qwen3-8B-Instruct-GGUF/resolve/main/$model" `
-  -OutFile "models\$model"
-```
-4-5 GB 程度。ダウンロードが遅ければ `huggingface-cli` (uv 経由でインストール可) を使うと resume が効く:
-```powershell
-uv tool run --from huggingface_hub huggingface-cli download `
-  Qwen/Qwen3-8B-Instruct-GGUF $model --local-dir models --local-dir-use-symlinks False
-```
-
-### 4.3 Playwright Chromium
-`PLAYWRIGHT_BROWSERS_PATH` を repo 配下に向け、per-user キャッシュを汚さない。
-```powershell
-$env:PLAYWRIGHT_BROWSERS_PATH = "$PWD\vendor\playwright-browsers"
-cd agent
-uv run playwright install chromium
-cd ..
-```
-環境変数は後述の `scripts/activate.ps1` で常時 export する。
-
-### 4.4 VOICEVOX エンジン (portable)
-```powershell
-# CPU 版 zip。GPU 版もある。
-$vv = "voicevox_engine-windows-cpu-x64-0.24.1"
-Invoke-WebRequest "https://github.com/VOICEVOX/voicevox_engine/releases/download/0.24.1/$vv.7z" `
-  -OutFile vendor\voicevox.7z
-# 7z 展開には 7-Zip が必要。未導入なら: winget install 7zip.7zip -e
-7z x vendor\voicevox.7z -ovendor\
-Rename-Item "vendor\$vv" vendor\voicevox
-Remove-Item vendor\voicevox.7z
-```
-`vendor\voicevox\run.exe` を daemon から子プロセスで spawn する。
-
----
-
-## 5. 環境変数 / シークレット
-
-### 5.1 `.env` (コミットしない)
-```env
-# Deepgram STT
-DEEPGRAM_API_KEY=sk-xxxx
-
-# (任意) llama-server の外部起動を使う場合のみ
-# LLAMA_SERVER_URL=http://127.0.0.1:8080
-
-# 開発用ログレベル
-AGENT_LOG_LEVEL=DEBUG
-```
-`.env.example` はコミット、`.env` は `.gitignore` 対象。
-
-### 5.2 `scripts/activate.ps1`
-現シェルのみに環境変数を設定する薄いスクリプト。repo root で `. .\scripts\activate.ps1` すると必要な PATH/env が揃う。
-
-```powershell
-# scripts/activate.ps1 (中身イメージ)
-$repo = (Resolve-Path "$PSScriptRoot\..").Path
-$env:PLAYWRIGHT_BROWSERS_PATH = "$repo\vendor\playwright-browsers"
-$env:LLAMA_SERVER_BIN         = "$repo\vendor\llama.cpp\llama-server.exe"
-$env:LLAMA_MODEL              = "$repo\models\Qwen3-8B-Instruct-Q4_K_M.gguf"
-$env:VOICEVOX_BIN             = "$repo\vendor\voicevox\run.exe"
-$env:AGENT_DATA_DIR           = "$env:APPDATA\desktop-ai-agent"
-Get-Content "$repo\.env" | ForEach-Object {
-  if ($_ -match '^\s*([^#][^=]*)=(.*)$') {
-    [Environment]::SetEnvironmentVariable($Matches[1].Trim(), $Matches[2].Trim(), 'Process')
-  }
-}
-Write-Host "desktop-ai-agent env activated ($repo)"
-```
-
-永続化しない (Process scope) ので、シェルを閉じれば環境変数も消える。
-
----
-
-## 6. 実行時データ配置
-
-実行時のみ `%APPDATA%/desktop-ai-agent/` に以下を作成 (repo を消しても残る):
-- `db.sqlite` — メモリ DB
-- `logs/` — ローテートログ
-- `browser-profile/` — agent 専用 Chromium プロファイル
-- `downloads/` — Playwright ダウンロード sandbox
-- `credentials/` — Windows Credential Manager 経由で storage_state 保管 (ファイルではなく DPAPI 保存)
-
-完全アンインストール時はこのディレクトリ削除 + rustup/fnm/uv の個別アンインストールで根こそぎ消える。
-
----
-
-## 7. 開発実行
-
-```powershell
-. .\scripts\activate.ps1   # 環境変数を流し込む
-cd frontend
-pnpm tauri dev             # Tauri が agent daemon を spawn、daemon が llama-server を spawn
-```
-
-初回は Rust のコンパイルで数分かかる。2 回目以降はインクリメンタル。
-
-### 7.1 daemon 単体起動 (デバッグ用)
-```powershell
+. .\scripts\activate.ps1
 cd agent
 uv run python -m agent --port 0 --token dev
 ```
 
-### 7.2 llama-server 単体起動 (LLM 動作確認)
+### llama-server だけ (LLM 疎通確認)
 ```powershell
+. .\scripts\activate.ps1
 & $env:LLAMA_SERVER_BIN -m $env:LLAMA_MODEL --jinja --port 8080 -c 8192
+# 別シェルで
+curl http://127.0.0.1:8080/v1/models
 ```
-その後 `curl http://127.0.0.1:8080/v1/models` で疎通確認。
 
 ---
 
-## 8. 一括 setup スクリプト
+## `activate.ps1` の効果
 
-上記 2–4 節の作業を自動化する `scripts/setup.ps1` を用意する (TBD)。初回セットアップは:
+`. .\scripts\activate.ps1` (先頭のドット必須) を実行すると**現シェルにのみ**以下の環境変数がセットされる:
 
-```powershell
-. .\scripts\setup.ps1
-```
+| 変数 | 値 |
+|------|----|
+| `REPO_ROOT` | repo の絶対パス |
+| `PLAYWRIGHT_BROWSERS_PATH` | `./vendor/playwright-browsers` |
+| `LLAMA_SERVER_BIN` | `./vendor/llama.cpp/llama-server.exe` |
+| `LLAMA_MODEL` | `./models/Qwen3-8B-Instruct-Q4_K_M.gguf` |
+| `VOICEVOX_BIN` | `./vendor/voicevox/run.exe` |
+| `AGENT_DATA_DIR` | `%APPDATA%/desktop-ai-agent` |
+| `.env` の内容 | そのまま |
 
-で rustup / fnm / uv の導入〜依存インストール〜llama.cpp・モデル・Playwright・VOICEVOX 取得まで一気通貫。冪等に作り、既に存在するものは skip。
+シェルを閉じれば全部消える (永続化しない)。
 
 ---
 
-## 9. アンインストール
+## `.env`
 
 ```powershell
-# 1. repo を消す (project-local は全消滅)
+copy .env.example .env
+notepad .env
+```
+最低限 `DEEPGRAM_API_KEY` を埋める。それ以外は任意。
+
+---
+
+## 実行時データ (repo の外に置かれるもの)
+
+daemon が起動時に作る:
+
+- `%APPDATA%/desktop-ai-agent/db.sqlite` — メモリ DB
+- `%APPDATA%/desktop-ai-agent/logs/` — ローテートログ
+- `%APPDATA%/desktop-ai-agent/browser-profile/` — agent 専用 Chromium プロファイル
+- `%APPDATA%/desktop-ai-agent/downloads/` — Playwright ダウンロード sandbox
+
+これらは **意図的に repo 外**。repo を消しても残る ↔ アンインストール時は別途削除が必要 (下記参照)。
+
+---
+
+## 完全アンインストール
+
+```powershell
+# 1. project-local は repo 削除で消滅
 Remove-Item -Recurse -Force C:\path\to\desktop-ai-agent
 
 # 2. 実行時データ
 Remove-Item -Recurse -Force $env:APPDATA\desktop-ai-agent
 
-# 3. per-user ツール (任意、他プロジェクトで使ってなければ)
+# 3. per-user ツール (他で使っていなければ)
 rustup self uninstall
 winget uninstall Schniz.fnm
-Remove-Item -Recurse -Force $env:USERPROFILE\.local\bin\uv.exe
+Remove-Item $env:USERPROFILE\.local\bin\uv.exe
 ```
 
-root が残るのは Visual Studio Build Tools のみ。それ以外はこの 3 ステップで痕跡ゼロ。
+残るのは VS Build Tools のみ。
 
 ---
 
-## 10. `.gitignore` 追加候補
+## トラブルシュート
 
-```gitignore
-# project-local vendor
-vendor/
-models/
-.venv/
-node_modules/
-frontend/dist/
-frontend/src-tauri/target/
-
-# secrets / state
-.env
-```
+| 症状 | 原因 | 対処 |
+|------|------|------|
+| `setup.ps1` が `rustc not found` でループ | rustup インストール直後で PATH が未反映 | 新しい PowerShell を開いて `.\scripts\setup.ps1` を再実行 |
+| `pnpm tauri dev` で MSVC リンクエラー | VS Build Tools 未導入 or C++ workload 欠落 | 前提 §2 をやり直す |
+| モデル DL が途中で落ちる | HTTPS タイムアウト | `uv tool run --from huggingface_hub huggingface-cli download ...` (setup.ps1 内部でも使用) で resume が効く。再実行でよい |
+| VOICEVOX 展開が skip される | 7-Zip 未導入 | `winget install 7zip.7zip -e` の後に再実行 |
+| `. .\scripts\activate.ps1` が "スクリプトの実行が無効" | ExecutionPolicy | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (user scope のみ変更) |
+| `llama-server.exe` が落ちる | AVX2 非対応 CPU | llama.cpp を AVX 版に差し替え。`scripts/setup.ps1` の `$LLAMA_ZIP` を `llama-*-bin-win-avx-x64.zip` に変更 |
