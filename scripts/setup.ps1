@@ -234,10 +234,12 @@ if (Test-Path (Join-Path $repo '.node-version')) {
 
         # Node 22.11's bundled corepack has a stale signing key; bumping
         # it to latest before enabling avoids a hard failure when it
-        # tries to fetch pnpm.
-        npm install -g corepack@latest 2>&1 | Out-Null
-        corepack enable 2>&1 | Out-Null
-        corepack prepare pnpm@9.15.0 --activate 2>&1 | Out-Null
+        # tries to fetch pnpm. We route through `cmd /c` because npm /
+        # corepack write progress notices to stderr, and PowerShell's
+        # Stop preference treats stderr lines as terminating errors.
+        cmd /c "npm install -g corepack@latest > nul 2>&1"
+        cmd /c "corepack enable > nul 2>&1"
+        cmd /c "corepack prepare pnpm@9.15.0 --activate > nul 2>&1"
         Pop-Location
         Write-Ok 'node + pnpm ready'
     }
