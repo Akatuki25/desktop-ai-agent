@@ -1,66 +1,104 @@
 import { useEffect, useState } from "react";
-import { createRpcClient, type RpcClient } from "./rpc/client";
+import { Character } from "./features/character/Character";
+import { ChatPanel } from "./features/chat-panel/ChatPanel";
+import { resolveDaemonInfo, type DaemonInfo } from "./rpc/bootstrap";
+import { createRpcClient, type RpcClient, type RpcEvent } from "./rpc/client";
+import {
+  useChatStore,
+  useCharacterStore,
+  useConnectionStore,
+  type Emotion,
+} from "./store";
 
-type Line = { role: "user" | "agent"; text: string };
+const VALID_EMOTIONS: ReadonlySet<Emotion> = new Set([
+  "neutral",
+  "smile",
+  "think",
+  "surprise",
+  "sad",
+  "angry",
+]);
+
+function isEmotion(value: unknown): value is Emotion {
+  return typeof value === "string" && VALID_EMOTIONS.has(value as Emotion);
+}
+
+function handleEvent(evt: RpcEvent): void {
+  const chat = useChatStore.getState();
+  const character = useCharacterStore.getState();
+
+  if (evt.method === "agent.say") {
+    const params = evt.params as {
+      text?: string;
+      emotion?: unknown;
+      is_thinking?: boolean;
+    };
+    const emotion: Emotion = isEmotion(params.emotion) ? params.emotion : "neutral";
+    chat.applyAgentDelta({
+      text: params.text ?? "",
+      emotion,
+      isThinking: Boolean(params.is_thinking),
+    });
+    character.setEmotion(emotion);
+    character.setAgentState(params.is_thinking ? "thinking" : "talking");
+  } else if (evt.method === "agent.say_end") {
+    chat.finalizeAgent();
+    character.setAgentState("idle");
+  }
+}
 
 export function App() {
+  const status = useConnectionStore((s) => s.state);
+  const setStatus = useConnectionStore((s) => s.setState);
   const [client, setClient] = useState<RpcClient | null>(null);
-  const [lines, setLines] = useState<Line[]>([]);
-  const [draft, setDraft] = useState("");
-  const [status, setStatus] = useState<"connecting" | "open" | "closed">("connecting");
 
   useEffect(() => {
-    // In dev standalone (no Tauri), read URL query for port/token.
-    const params = new URLSearchParams(window.location.search);
-    const port = Number(params.get("port") ?? "0");
-    const token = params.get("token") ?? "";
-    if (!port || !token) {
-      setStatus("closed");
-      return;
-    }
-    const c = createRpcClient({
-      url: `ws://127.0.0.1:${port}/ws`,
-      token,
-      onEvent: (evt) => {
-        if (evt.method === "agent.say") {
-          setLines((prev) => [...prev, { role: "agent", text: evt.params.text }]);
-        }
-      },
-      onStatus: setStatus,
-    });
-    setClient(c);
-    return () => c.close();
-  }, []);
+    let cancelled = false;
+    let currentClient: RpcClient | null = null;
 
-  const send = () => {
-    if (!draft.trim() || !client) return;
-    setLines((prev) => [...prev, { role: "user", text: draft }]);
-    client.send("session.send_text", { text: draft });
-    setDraft("");
-  };
+    (async () => {
+      const info: DaemonInfo | null = await resolveDaemonInfo();
+      if (cancelled) return;
+      if (!info) {
+        setStatus("closed");
+        return;
+      }
+      setStatus("connecting");
+      currentClient = createRpcClient({
+        url: `ws://127.0.0.1:${info.port}/ws`,
+        token: info.token,
+        onEvent: handleEvent,
+        onStatus: setStatus,
+      });
+      setClient(currentClient);
+    })();
+
+    return () => {
+      cancelled = true;
+      currentClient?.close();
+    };
+  }, [setStatus]);
 
   return (
-    <div data-testid="app" style={{ fontFamily: "system-ui", padding: 16 }}>
-      <header>
-        <h1 style={{ fontSize: 16 }}>desktop-ai-agent</h1>
-        <p data-testid="status">status: {status}</p>
+    <div
+      style={{
+        fontFamily: "system-ui",
+        padding: 12,
+        width: 380,
+        background: "transparent",
+      }}
+    >
+      <header style={{ marginBottom: 8 }}>
+        <h1 style={{ fontSize: 14, margin: 0 }}>desktop-ai-agent</h1>
+        <p data-testid="status" style={{ fontSize: 11, opacity: 0.6, margin: 0 }}>
+          status: {status}
+        </p>
       </header>
-      <ul data-testid="lines" style={{ listStyle: "none", padding: 0 }}>
-        {lines.map((l, i) => (
-          <li key={i}>
-            <strong>{l.role}:</strong> {l.text}
-          </li>
-        ))}
-      </ul>
-      <div>
-        <input
-          aria-label="message"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
-        />
-        <button onClick={send}>send</button>
-      </div>
+      <Character />
+      <ChatPanel
+        disabled={status !== "open"}
+        onSend={(text) => client?.send("session.send_text", { text })}
+      />
     </div>
   );
 }
