@@ -13,7 +13,7 @@ $repo = (Resolve-Path "$PSScriptRoot\..").Path
 $env:REPO_ROOT                = $repo
 $env:PLAYWRIGHT_BROWSERS_PATH = Join-Path $repo 'vendor\playwright-browsers'
 $env:LLAMA_SERVER_BIN         = Join-Path $repo 'vendor\llama.cpp\llama-server.exe'
-$env:LLAMA_MODEL              = Join-Path $repo 'models\Qwen3-8B-Instruct-Q4_K_M.gguf'
+$env:LLAMA_MODEL              = Join-Path $repo 'models\Qwen3.5-9B-Q4_K_M.gguf'
 $env:VOICEVOX_BIN             = Join-Path $repo 'vendor\voicevox\run.exe'
 $env:AGENT_DATA_DIR           = Join-Path $env:APPDATA 'desktop-ai-agent'
 

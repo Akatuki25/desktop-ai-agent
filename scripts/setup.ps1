@@ -27,18 +27,25 @@ $repo = (Resolve-Path "$PSScriptRoot\..").Path
 Set-Location $repo
 
 # ---- versions (single source of truth) ----
-$LLAMA_RELEASE  = 'b4000'
-$LLAMA_ZIP      = "llama-$LLAMA_RELEASE-bin-win-avx2-x64.zip"
+# llama.cpp must be >= b8200 because we depend on the --jinja flag and
+# the new delta.reasoning_content streaming field for Qwen3-style
+# thinking. b4000 (the previous pin) silently dropped both.
+$LLAMA_RELEASE  = 'b8798'
+$LLAMA_ZIP      = "llama-$LLAMA_RELEASE-bin-win-cpu-x64.zip"
 $LLAMA_URL      = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_RELEASE/$LLAMA_ZIP"
 
-$MODEL_REPO     = 'Qwen/Qwen3-8B-Instruct-GGUF'
-$MODEL_FILE     = 'Qwen3-8B-Instruct-Q4_K_M.gguf'
-$MODEL_URL      = "https://huggingface.co/$MODEL_REPO/resolve/main/$MODEL_FILE"
+# unsloth/Qwen3.5-9B-GGUF is the actual current GGUF release for the
+# Qwen3.5 dense model family. The original spec said "Qwen3.5 8B" but
+# the closest published dense size is 9B; we use that.
+$MODEL_REPO     = 'unsloth/Qwen3.5-9B-GGUF'
+$MODEL_FILE     = 'Qwen3.5-9B-Q4_K_M.gguf'
 
-$VOICEVOX_VER   = '0.24.1'
-$VOICEVOX_DIR   = "voicevox_engine-windows-cpu-x64-$VOICEVOX_VER"
-$VOICEVOX_7Z    = "$VOICEVOX_DIR.7z"
-$VOICEVOX_URL   = "https://github.com/VOICEVOX/voicevox_engine/releases/download/$VOICEVOX_VER/$VOICEVOX_7Z"
+# VOICEVOX 0.25.1 ships windows-cpu as a single-part 7z named .7z.001.
+# 7-Zip handles the .001 entry point natively.
+$VOICEVOX_VER   = '0.25.1'
+$VOICEVOX_BASE  = "voicevox_engine-windows-cpu-$VOICEVOX_VER"
+$VOICEVOX_FILE  = "$VOICEVOX_BASE.7z.001"
+$VOICEVOX_URL   = "https://github.com/VOICEVOX/voicevox_engine/releases/download/$VOICEVOX_VER/$VOICEVOX_FILE"
 
 # ---- warning aggregator (shown again at the end) ----
 $script:Warnings = @()
@@ -77,7 +84,15 @@ if (-not $NoExecPolicy) {
     $current = Get-ExecutionPolicy -Scope CurrentUser
     if ($current -eq 'Restricted' -or $current -eq 'Undefined' -or $current -eq 'AllSigned') {
         Write-Host "  setting CurrentUser ExecutionPolicy to RemoteSigned (was: $current)" -ForegroundColor DarkGray
-        Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+        try {
+            Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force `
+                -WarningAction SilentlyContinue -ErrorAction Stop
+        } catch {
+            # Process-scope policy (e.g. -ExecutionPolicy Bypass on the
+            # current pwsh) shadows CurrentUser and surfaces here as a
+            # SecurityException. Harmless: the user scope was still set.
+            Write-Host "  (CurrentUser policy update warning ignored: $($_.Exception.Message))" -ForegroundColor DarkGray
+        }
     }
 }
 
@@ -196,13 +211,33 @@ if (Test-Path (Join-Path $repo '.node-version')) {
     if (-not (Test-Command fnm)) {
         Add-Warning 'fnm not on PATH in this session — skipping fnm use. Open a new shell and re-run.'
     } else {
+        # `fnm use` only works once `fnm env` has been evaluated in the
+        # current shell so $env:FNM_DIR / $env:FNM_MULTISHELL_PATH are
+        # set. We pipe that into Invoke-Expression here so a brand new
+        # PowerShell session works without a profile.
+        try {
+            fnm env --use-on-cd | Out-String | Invoke-Expression
+        } catch {
+            Add-Warning "fnm env init failed: $($_.Exception.Message)"
+        }
+
         Push-Location $repo
         fnm use --install-if-missing
         if ($LASTEXITCODE -ne 0) { Pop-Location; Fail 'fnm use failed.' }
-        # Make node/pnpm visible in this session
-        $nodeDir = (fnm exec --using default node -e "console.log(require('path').dirname(process.execPath))" 2>$null)
-        if ($nodeDir) { Add-PathOnce $nodeDir }
+
+        # Surface node + npm globals in this session so subsequent
+        # corepack / pnpm / pnpm install steps find them.
+        $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
+        if ($nodeCmd) {
+            Add-PathOnce ([System.IO.Path]::GetDirectoryName($nodeCmd.Source))
+        }
+
+        # Node 22.11's bundled corepack has a stale signing key; bumping
+        # it to latest before enabling avoids a hard failure when it
+        # tries to fetch pnpm.
+        npm install -g corepack@latest 2>&1 | Out-Null
         corepack enable 2>&1 | Out-Null
+        corepack prepare pnpm@9.15.0 --activate 2>&1 | Out-Null
         Pop-Location
         Write-Ok 'node + pnpm ready'
     }
@@ -245,37 +280,76 @@ Ensure-Dir (Join-Path $repo 'models')
 Write-Step '3a. llama.cpp (prebuilt)'
 $llamaDir = Join-Path $repo 'vendor\llama.cpp'
 $llamaExe = Join-Path $llamaDir 'llama-server.exe'
+
+function Get-LlamaServerBuild {
+    param([string]$exe)
+    if (-not (Test-Path $exe)) { return 0 }
+    # Run via cmd /c so PowerShell does not parse stderr lines as
+    # ErrorRecord objects (llama-server emits backend-load notices to
+    # stderr before printing its version banner).
+    $out = cmd /c "`"$exe`" --version 2>&1"
+    $m = [regex]::Match($out, 'version:\s*(\d+)')
+    if ($m.Success) { return [int]$m.Groups[1].Value }
+    return 0
+}
+
+$needLlama = $true
 if (Test-Path $llamaExe) {
-    Write-Skip "llama-server.exe already at $llamaExe"
-} else {
+    $build = Get-LlamaServerBuild $llamaExe
+    if ($build -ge 8200) {
+        Write-Skip "llama-server.exe already at $llamaExe (b$build)"
+        $needLlama = $false
+    } elseif ($build -gt 0) {
+        Write-Host "  llama-server.exe is b$build (< b8200, missing --jinja) — replacing" -ForegroundColor DarkGray
+        Remove-Item -Recurse -Force $llamaDir
+    } else {
+        Write-Host "  llama-server.exe present but version unreadable — replacing" -ForegroundColor DarkGray
+        Remove-Item -Recurse -Force $llamaDir
+    }
+}
+
+if ($needLlama) {
     Ensure-Dir $llamaDir
     $zipOut = Join-Path $env:TEMP $LLAMA_ZIP
     Download-File $LLAMA_URL $zipOut
     Expand-Archive -Path $zipOut -DestinationPath $llamaDir -Force
     Remove-Item $zipOut -Force
     if (-not (Test-Path $llamaExe)) { Fail "llama-server.exe missing after extraction ($llamaDir)." }
-    Write-Ok "llama.cpp $LLAMA_RELEASE extracted"
+    $build = Get-LlamaServerBuild $llamaExe
+    if ($build -lt 8200) {
+        Fail "downloaded llama-server.exe is b$build (< b8200); update `$LLAMA_RELEASE."
+    }
+    Write-Ok "llama.cpp b$build extracted"
 }
 
-Write-Step '3b. Qwen3 GGUF model'
-$modelPath = Join-Path $repo "models\$MODEL_FILE"
+Write-Step '3b. Qwen3.5 GGUF model'
+$modelsDir = Join-Path $repo 'models'
+Ensure-Dir $modelsDir
+$modelPath = Join-Path $modelsDir $MODEL_FILE
 if ($SkipModel) {
     Write-Skip 'model download skipped (flag)'
 } elseif (Test-Path $modelPath) {
-    Write-Skip "$MODEL_FILE already at $modelPath"
+    $sizeMb = [math]::Round((Get-Item $modelPath).Length / 1MB)
+    Write-Skip "$MODEL_FILE already at $modelPath ($sizeMb MB)"
 } else {
-    Write-Host '  downloading model (several GB, may take a while)' -ForegroundColor DarkGray
-    if (Test-Command uv) {
-        uv tool run --from huggingface_hub huggingface-cli download `
-            $MODEL_REPO $MODEL_FILE `
-            --local-dir (Join-Path $repo 'models') `
-            --local-dir-use-symlinks False
-        if ($LASTEXITCODE -ne 0) { Fail 'huggingface-cli download failed.' }
-    } else {
-        Download-File $MODEL_URL $modelPath
+    Write-Host "  downloading $MODEL_REPO/$MODEL_FILE (~5GB) via hf-cli" -ForegroundColor DarkGray
+    if (-not (Test-Command uv)) { Fail 'uv not on PATH; cannot drive hf download.' }
+    # `huggingface-cli download` is deprecated; the new entry point is
+    # `hf download`. We pass an absolute --local-dir so the file lands
+    # under repo\models\ regardless of the caller's CWD (an earlier bug
+    # let it land under whatever directory we happened to be in).
+    uv tool run --from huggingface_hub hf download `
+        $MODEL_REPO $MODEL_FILE `
+        --local-dir $modelsDir
+    if ($LASTEXITCODE -ne 0) { Fail 'hf download failed.' }
+    if (-not (Test-Path $modelPath)) {
+        Fail "model file missing after hf download (expected $modelPath)."
     }
-    if (-not (Test-Path $modelPath)) { Fail "model file missing after download ($modelPath)." }
-    Write-Ok 'model downloaded'
+    $sizeMb = [math]::Round((Get-Item $modelPath).Length / 1MB)
+    if ($sizeMb -lt 1000) {
+        Fail "model file is suspiciously small ($sizeMb MB) — refusing to continue."
+    }
+    Write-Ok "model downloaded ($sizeMb MB)"
 }
 
 Write-Step '3c. Playwright Chromium (project-local cache)'
@@ -283,14 +357,22 @@ $playwrightDir = Join-Path $repo 'vendor\playwright-browsers'
 $env:PLAYWRIGHT_BROWSERS_PATH = $playwrightDir
 if ((Test-Path $playwrightDir) -and (Get-ChildItem $playwrightDir -ErrorAction SilentlyContinue)) {
     Write-Skip 'playwright browsers already present'
-} elseif (Test-Path (Join-Path $agentDir 'pyproject.toml')) {
-    Push-Location $agentDir
-    uv run playwright install chromium
-    if ($LASTEXITCODE -ne 0) { Pop-Location; Fail 'playwright install failed.' }
-    Pop-Location
-    Write-Ok 'chromium installed to vendor/'
-} else {
+} elseif (-not (Test-Path (Join-Path $agentDir 'pyproject.toml'))) {
     Write-Skip 'agent not yet scaffolded — run playwright install later'
+} else {
+    # Phase 4 wires the agent's playwright dependency in. Until then
+    # the `playwright` CLI isn't in the venv and there's nothing to
+    # install, so probe first instead of failing setup.
+    Push-Location $agentDir
+    cmd /c "uv run playwright --version > nul 2>&1"
+    if ($LASTEXITCODE -eq 0) {
+        uv run playwright install chromium
+        if ($LASTEXITCODE -ne 0) { Pop-Location; Fail 'playwright install failed.' }
+        Write-Ok 'chromium installed to vendor/'
+    } else {
+        Write-Skip 'playwright not in agent deps yet (Phase 4) — skipping browser install'
+    }
+    Pop-Location
 }
 
 Write-Step '3d. VOICEVOX engine (portable)'
@@ -307,19 +389,30 @@ if ($SkipVoicevox) {
         Add-PathOnce 'C:\Program Files\7-Zip'
     }
     if (-not (Test-Command 7z)) {
-        Add-Warning '7-Zip install failed — skipping voicevox. Install 7-Zip manually and re-run.'
-    } else {
-        $archive = Join-Path $env:TEMP $VOICEVOX_7Z
-        Download-File $VOICEVOX_URL $archive
-        & 7z x $archive "-o$(Join-Path $repo 'vendor')" -y | Out-Null
-        if ($LASTEXITCODE -ne 0) { Fail 'voicevox extraction failed.' }
-        $extracted = Join-Path $repo "vendor\$VOICEVOX_DIR"
-        if (Test-Path $vvDir) { Remove-Item -Recurse -Force $vvDir }
-        Rename-Item $extracted $vvDir
-        Remove-Item $archive -Force
-        if (-not (Test-Path $vvBin)) { Fail "voicevox run.exe missing after extraction ($vvDir)." }
-        Write-Ok 'voicevox extracted'
+        Fail '7-Zip install failed and is required to extract VOICEVOX. Install 7-Zip manually and re-run.'
     }
+    # VOICEVOX 0.25+ packages windows-cpu as a single-part 7z named
+    # `<base>.7z.001`. 7-Zip's CLI knows how to enter the .001 file
+    # without explicit reassembly. The extracted directory name varies
+    # across releases (e.g. 0.25.1 ships as `windows-cpu/`), so we
+    # locate run.exe ourselves rather than guessing the path.
+    $archive = Join-Path $env:TEMP $VOICEVOX_FILE
+    Download-File $VOICEVOX_URL $archive
+    $extractTo = Join-Path $repo 'vendor'
+    & 7z x $archive "-o$extractTo" -y | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail 'voicevox extraction failed.' }
+
+    $candidate = Get-ChildItem $extractTo -Directory `
+        | Where-Object { Test-Path (Join-Path $_.FullName 'run.exe') } `
+        | Select-Object -First 1
+    if (-not $candidate) {
+        Fail "voicevox extraction completed but run.exe is nowhere under $extractTo."
+    }
+    if (Test-Path $vvDir) { Remove-Item -Recurse -Force $vvDir }
+    Rename-Item $candidate.FullName $vvDir
+    Remove-Item $archive -Force
+    if (-not (Test-Path $vvBin)) { Fail "voicevox run.exe missing after extraction ($vvDir)." }
+    Write-Ok 'voicevox extracted'
 }
 
 # ---- 4. .env scaffold ----
