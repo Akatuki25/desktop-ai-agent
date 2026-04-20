@@ -1,18 +1,21 @@
-"""Session lifecycle + turn loop.
-
-Phase 0 scope: text-only chat, no tool calls. The orchestrator is the
-only place that knows about both the memory layer and the LLM backend;
-interface/server.py just forwards events between the orchestrator and
-the WebSocket.
-"""
+"""Session lifecycle + turn loop with tool execution."""
 
 from agent.orchestrator.prompt import build_messages
 from agent.orchestrator.session import SessionManager
-from agent.orchestrator.turn_loop import SayEvent, TurnLoop
+from agent.orchestrator.turn_loop import (
+    SayEvent,
+    ToolRequestEvent,
+    ToolResultEvent,
+    TTSEvent,
+    TurnLoop,
+)
 
 __all__ = [
     "SayEvent",
     "SessionManager",
+    "TTSEvent",
+    "ToolRequestEvent",
+    "ToolResultEvent",
     "TurnLoop",
     "build_messages",
 ]
