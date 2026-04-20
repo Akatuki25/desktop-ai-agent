@@ -27,7 +27,7 @@ def app_with_orchestrator(tmp_path: Path) -> tuple[TestClient, SessionRepository
     llm = FakeLLMBackend("<think>plan</think>こんにちは akatuki", chunk_size=5)
     loop = TurnLoop(
         sessions=repo,
-        session_manager=SessionManager(repo),
+        session_manager=SessionManager(repo, llm),
         core_memory=core,
         behavior=behavior,
         llm=llm,

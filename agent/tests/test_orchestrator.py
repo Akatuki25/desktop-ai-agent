@@ -62,7 +62,7 @@ async def test_turn_loop_persists_and_streams(
     llm = FakeLLMBackend("<think>plan</think>こんにちは", chunk_size=4)
     loop = TurnLoop(
         sessions=repo,
-        session_manager=SessionManager(repo),
+        session_manager=SessionManager(repo, llm),
         core_memory=core,
         behavior=behavior,
         llm=llm,
@@ -101,7 +101,7 @@ async def test_turn_loop_reuses_existing_session(
     llm = FakeLLMBackend("ok")
     loop = TurnLoop(
         sessions=repo,
-        session_manager=SessionManager(repo),
+        session_manager=SessionManager(repo, llm),
         core_memory=core,
         behavior=behavior,
         llm=llm,
