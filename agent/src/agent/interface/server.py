@@ -43,6 +43,21 @@ def create_app(token: str, *, turn_loop: TurnLoopLike | None = None) -> FastAPI:
     app = FastAPI(title="desktop-ai-agent", version="0.0.0")
     app.state.token = token
     app.state.turn_loop = turn_loop
+    # Active WS connections for broadcast (proactive notifications).
+    app.state.clients: set[WebSocket] = set()  # type: ignore[misc]
+
+    async def broadcast(msg: dict[str, Any]) -> None:
+        """Send a JSON message to all connected WS clients."""
+        dead: set[WebSocket] = set()
+        clients: set[WebSocket] = app.state.clients
+        for ws_client in clients:
+            try:
+                await ws_client.send_json(msg)
+            except Exception:
+                dead.add(ws_client)
+        clients -= dead
+
+    app.state.broadcast = broadcast
 
     @app.get("/healthz")
     async def healthz() -> dict[str, bool]:
@@ -64,13 +79,14 @@ def create_app(token: str, *, turn_loop: TurnLoopLike | None = None) -> FastAPI:
                 subprotocol = proto
                 break
         await websocket.accept(subprotocol=subprotocol)
+        app.state.clients.add(websocket)
 
         try:
             while True:
                 msg: dict[str, Any] = await websocket.receive_json()
                 await _dispatch(websocket, msg, turn_loop)
         except WebSocketDisconnect:
-            return
+            app.state.clients.discard(websocket)
 
     return app
 
@@ -98,6 +114,34 @@ async def _dispatch(
                     await _send_event(
                         ws, "agent.say_end", {"message_id": evt.message_id}
                     )
+                elif evt.kind == "tool_request":
+                    await _send_event(
+                        ws,
+                        "tool.request_confirm",
+                        {
+                            "call_id": evt.call_id,
+                            "tool": evt.tool_name,
+                            "args": evt.arguments,
+                            "risk": evt.risk,
+                            "requires_confirmation": evt.requires_confirmation,
+                        },
+                    )
+                elif evt.kind == "tool_result":
+                    await _send_event(
+                        ws,
+                        "tool.result",
+                        {
+                            "call_id": evt.call_id,
+                            "ok": evt.ok,
+                            "summary": evt.summary,
+                        },
+                    )
+                elif evt.kind == "tts":
+                    # Send TTS audio as a binary WS frame.
+                    # Tag byte 0x02 = tts, then 8 bytes seq (0 for now),
+                    # then WAV payload.
+                    tag = b"\x02" + b"\x00" * 8 + evt.audio_wav
+                    await ws.send_bytes(tag)
 
         if req_id is not None:
             await ws.send_json({"jsonrpc": "2.0", "id": req_id, "result": {"ok": True}})

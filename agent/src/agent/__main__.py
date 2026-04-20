@@ -118,7 +118,7 @@ def main(argv: list[str] | None = None) -> None:
         backend = LlamaServerBackend(base_url=base_url)
         loop = TurnLoop(
             sessions=repo,
-            session_manager=SessionManager(repo),
+            session_manager=SessionManager(repo, backend),
             core_memory=core,
             behavior=behavior,
             llm=backend,
