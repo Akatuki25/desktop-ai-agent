@@ -41,16 +41,18 @@ class LlamaServerBackend:
         self,
         messages: list[Message],
         *,
+        tools: list[dict[str, object]] | None = None,
         thinking: bool = False,
     ) -> AsyncIterator[LLMChunk]:
-        payload = {
+        payload: dict[str, object] = {
             "model": self.model,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "stream": True,
             "temperature": self.temperature,
         }
+        if tools:
+            payload["tools"] = tools
         if not thinking:
-            # Qwen3 soft-switch: inline directive the model recognises.
             payload["chat_template_kwargs"] = {"enable_thinking": False}
 
         parser = ThinkingStreamParser()

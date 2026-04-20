@@ -21,17 +21,28 @@ class Message:
 
 
 @dataclass(frozen=True)
+class ToolCallDelta:
+    """A tool call requested by the LLM."""
+
+    id: str
+    name: str
+    arguments_json: str
+
+
+@dataclass(frozen=True)
 class LLMChunk:
     """One delta from a streaming LLM response.
 
     `is_thinking=True` marks tokens that belong to the <think>...</think>
     envelope and should be rendered in the bubble's secondary layer.
     `done=True` is the final sentinel with an empty text.
+    `tool_calls` is set when the LLM requests tool execution.
     """
 
     text: str
     is_thinking: bool = False
     done: bool = False
+    tool_calls: list[ToolCallDelta] | None = None
 
 
 @runtime_checkable
@@ -40,6 +51,7 @@ class LLMBackend(Protocol):
         self,
         messages: list[Message],
         *,
+        tools: list[dict[str, object]] | None = None,
         thinking: bool = False,
     ) -> AsyncIterator[LLMChunk]:
         """Return an async iterator that streams LLMChunks.

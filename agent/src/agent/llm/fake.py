@@ -61,6 +61,7 @@ class FakeLLMBackend:
         self,
         messages: list[Message],
         *,
+        tools: list[dict[str, object]] | None = None,
         thinking: bool = False,
     ) -> AsyncIterator[LLMChunk]:
         self.last_messages = list(messages)

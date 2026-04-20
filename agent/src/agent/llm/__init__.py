@@ -6,7 +6,7 @@ else OpenAI-compatible. `FakeLLMBackend` exists for tests so we don't
 need a running model.
 """
 
-from agent.llm.backend import LLMBackend, LLMChunk, Message
+from agent.llm.backend import LLMBackend, LLMChunk, Message, ToolCallDelta
 from agent.llm.fake import FakeLLMBackend
 from agent.llm.llama_server import LlamaServerBackend
 from agent.llm.stream_parser import ThinkingStreamParser
@@ -18,4 +18,5 @@ __all__ = [
     "LlamaServerBackend",
     "Message",
     "ThinkingStreamParser",
+    "ToolCallDelta",
 ]
