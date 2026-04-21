@@ -6,20 +6,33 @@ export function Character() {
   const emotion = useCharacterStore((s) => s.emotion);
   const sprite = resolveSprite(agentState, emotion);
 
+  if (sprite === null) {
+    // hidden state — render nothing
+    return <div data-testid="character" data-state="hidden" />;
+  }
+
   return (
     <div
       data-testid="character"
       data-state={agentState}
       data-emotion={emotion}
-      className={sprite.cssClass}
       style={{
-        fontFamily: "monospace",
-        fontSize: 48,
         textAlign: "center",
-        minHeight: 64,
+        transition: "opacity 150ms ease",
       }}
     >
-      {sprite.glyph}
+      <img
+        src={sprite}
+        alt="agent character"
+        style={{
+          width: 160,
+          height: "auto",
+          imageRendering: "auto",
+          pointerEvents: "none",
+          userSelect: "none",
+        }}
+        draggable={false}
+      />
     </div>
   );
 }

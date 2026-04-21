@@ -8,11 +8,12 @@ describe("Character", () => {
     useCharacterStore.setState({ agentState: "idle", emotion: "neutral" });
   });
 
-  it("renders a sprite placeholder for the current state/emotion", () => {
+  it("renders an image for the current state/emotion", () => {
     render(<Character />);
     const el = screen.getByTestId("character");
     expect(el.getAttribute("data-state")).toBe("idle");
     expect(el.getAttribute("data-emotion")).toBe("neutral");
+    expect(el.querySelector("img")).not.toBeNull();
   });
 
   it("reacts to store updates", () => {
@@ -25,9 +26,11 @@ describe("Character", () => {
     expect(el.getAttribute("data-emotion")).toBe("smile");
   });
 
-  it("uses the thinking glyph when emotion is think", () => {
-    useCharacterStore.setState({ agentState: "thinking", emotion: "think" });
+  it("renders nothing visible when hidden", () => {
+    useCharacterStore.setState({ agentState: "hidden", emotion: "neutral" });
     render(<Character />);
-    expect(screen.getByTestId("character")).toHaveTextContent("…");
+    const el = screen.getByTestId("character");
+    expect(el.getAttribute("data-state")).toBe("hidden");
+    expect(el.querySelector("img")).toBeNull();
   });
 });
