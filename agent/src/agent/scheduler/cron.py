@@ -23,7 +23,7 @@ class CronScheduler:
     def __init__(self, db: Database, callback: ProactiveCallback) -> None:
         self._db = db
         self._callback = callback
-        self._scheduler = AsyncIOScheduler()
+        self._scheduler = AsyncIOScheduler(timezone="Asia/Tokyo")
 
     def load_tasks(self) -> int:
         """Read scheduled_tasks from DB and register APScheduler jobs.

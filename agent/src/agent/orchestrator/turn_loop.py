@@ -33,6 +33,16 @@ from agent.voice.tts_voicevox import VoicevoxTTS
 
 MAX_TOOL_STEPS = 5
 
+# Canned TTS phrases spoken immediately when a tool is called, so the
+# user hears something instead of silence during tool execution.
+_TOOL_VOICE: dict[str, str] = {
+    "memory.search": "記憶を検索しています",
+    "memory.upsert": "記憶を更新しています",
+    "schedule.register_task": "スケジュールを設定しています",
+    "ask_user": "確認があります",
+}
+_TOOL_VOICE_DEFAULT = "処理中です"
+
 
 @dataclass(frozen=True)
 class SayEvent:
@@ -155,6 +165,17 @@ class TurnLoop:
                         call_id=tc.id, ok=False, error=f"unknown tool: {tc.name}"
                     )
                 else:
+                    # Speak a canned phrase immediately so the user
+                    # doesn't hear silence while the tool executes.
+                    if self._tts is not None:
+                        phrase = _TOOL_VOICE.get(tc.name, _TOOL_VOICE_DEFAULT)
+                        yield SayEvent(kind="delta", text=phrase, is_thinking=False)
+                        try:
+                            wav = await self._tts.synthesize(phrase)
+                            yield TTSEvent(audio_wav=wav)
+                        except Exception:
+                            pass  # TTS failure is non-fatal
+
                     yield ToolRequestEvent(
                         call_id=tc.id,
                         tool_name=tc.name,

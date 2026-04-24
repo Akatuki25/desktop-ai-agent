@@ -8,9 +8,13 @@ a future tool call, not a prompt injection.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from agent.llm.backend import Message
 from agent.memory import BehaviorConfig, CoreMemory, SessionRepository
 from agent.memory import Message as StoredMessage
+
+_JST = timezone(offset=__import__("datetime").timedelta(hours=9))
 
 
 def build_system_prompt(
@@ -20,10 +24,17 @@ def build_system_prompt(
     *,
     recent_summaries: int = 10,
 ) -> str:
+    now = datetime.now(_JST)
     parts: list[str] = [
         "You are a desktop companion agent. Speak concisely in the user's language.",
         "When you think step by step, wrap reasoning in <think>...</think>;"
         " everything outside those tags is shown directly to the user.",
+        f"## Current date and time\n{now.strftime('%Y-%m-%d %H:%M:%S')} JST"
+        f" ({now.strftime('%A')})",
+        "When the user asks to schedule something using relative time"
+        ' (e.g. "5分後", "30分後"), calculate the absolute time from'
+        " the current time above, then convert it to a cron expression."
+        " For one-shot tasks, use the exact minute/hour/day fields.",
     ]
 
     core_items = core.all()
