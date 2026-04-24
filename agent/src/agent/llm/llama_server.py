@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from agent.llm.backend import LLMChunk, Message
+from agent.llm.backend import LLMChunk, Message, ToolCallDelta
 from agent.llm.stream_parser import ThinkingStreamParser
 
 
@@ -57,6 +57,11 @@ class LlamaServerBackend:
 
         parser = ThinkingStreamParser()
 
+        # Accumulator for streaming tool_calls. llama-server sends them
+        # incrementally: first chunk has id+name, subsequent chunks append
+        # to arguments. We merge by index and emit on finish_reason=tool_calls.
+        pending_tools: dict[int, dict[str, str]] = {}
+
         async with (
             self._make_client() as client,
             client.stream(
@@ -79,23 +84,52 @@ class LlamaServerBackend:
                 choices = obj.get("choices") or []
                 if not choices:
                     continue
-                delta = choices[0].get("delta") or {}
+                choice = choices[0]
+                delta = choice.get("delta") or {}
+                finish = choice.get("finish_reason")
 
-                # Newer llama.cpp (b8000+) splits Qwen-style thinking into a
-                # dedicated `reasoning_content` field instead of leaving the
-                # <think>...</think> envelope inline. Emit those tokens
-                # directly as is_thinking=True so the bubble's secondary
-                # layer still receives them; do NOT run them through the
-                # tag parser (no envelope to parse).
+                # --- streaming tool_calls accumulation ---
+                tc_list = delta.get("tool_calls") or []
+                for tc in tc_list:
+                    idx = tc.get("index", 0)
+                    if idx not in pending_tools:
+                        pending_tools[idx] = {
+                            "id": tc.get("id", ""),
+                            "name": (tc.get("function") or {}).get("name", ""),
+                            "arguments": "",
+                        }
+                    args_piece = (tc.get("function") or {}).get("arguments", "")
+                    if args_piece:
+                        pending_tools[idx]["arguments"] += args_piece
+                    # Capture the id if it comes in a later chunk.
+                    if tc.get("id"):
+                        pending_tools[idx]["id"] = tc["id"]
+                    fn = (tc.get("function") or {}).get("name")
+                    if fn:
+                        pending_tools[idx]["name"] = fn
+
+                if finish == "tool_calls" and pending_tools:
+                    calls = [
+                        ToolCallDelta(
+                            id=t["id"],
+                            name=t["name"],
+                            arguments_json=t["arguments"],
+                        )
+                        for t in pending_tools.values()
+                    ]
+                    yield LLMChunk(text="", tool_calls=calls)
+                    pending_tools.clear()
+                    continue
+
+                # --- reasoning_content (thinking) ---
                 reasoning = delta.get("reasoning_content") or ""
                 if reasoning:
                     yield LLMChunk(text=reasoning, is_thinking=True)
 
+                # --- regular content ---
                 piece = delta.get("content") or ""
                 if not piece:
                     continue
-                # `content` may still contain inline <think> tags on older
-                # builds — keep the parser path for that case.
                 for emit, is_thinking in parser.feed(piece):
                     yield LLMChunk(text=emit, is_thinking=is_thinking)
 

@@ -54,6 +54,6 @@ def build_messages(
 ) -> list[Message]:
     msgs: list[Message] = [Message(role="system", content=system_prompt)]
     for m in history:
-        if m.role in ("user", "assistant", "system"):
+        if m.role in ("user", "assistant", "system", "tool"):
             msgs.append(Message(role=m.role, content=m.content))
     return msgs

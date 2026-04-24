@@ -104,6 +104,7 @@ class TurnLoop:
 
         system_prompt = build_system_prompt(self._core, self._behavior, self._sessions)
         tool_schemas = self._tools.openai_schemas() or None
+        prev_tool_sig: str | None = None  # detect consecutive identical calls
 
         for _step in range(MAX_TOOL_STEPS + 1):
             history = self._sessions.recent_messages(session.id, self._history_window)
@@ -134,6 +135,17 @@ class TurnLoop:
             # If no tool calls, we're done.
             if not tool_calls:
                 break
+
+            # Detect consecutive identical tool calls (spec §3.4.3).
+            current_sig = "|".join(f"{tc.name}:{tc.arguments_json}" for tc in tool_calls)
+            if current_sig == prev_tool_sig:
+                yield SayEvent(
+                    kind="delta",
+                    text="(same tool call repeated — breaking loop)",
+                    is_thinking=False,
+                )
+                break
+            prev_tool_sig = current_sig
 
             # Execute each tool call and inject results.
             for tc in tool_calls:
@@ -201,9 +213,10 @@ class TurnLoop:
         final_text = "".join(main_buf).strip()
         if final_text:
             stored = self._sessions.append_message(session.id, "assistant", final_text)
-            yield SayEvent(kind="end", message_id=str(stored.id))
 
-            # TTS: synthesize the reply and emit the audio.
+            # TTS before end so the client can play audio while
+            # rendering the final bubble. agent.say_end is the
+            # last event — clients stop listening after it.
             if self._tts is not None:
                 try:
                     wav = await self._tts.synthesize(final_text)
@@ -212,5 +225,7 @@ class TurnLoop:
                     import sys
 
                     sys.stderr.write(f"[voice] TTS synthesis failed: {e}\n")
+
+            yield SayEvent(kind="end", message_id=str(stored.id))
         else:
             yield SayEvent(kind="end", message_id="")

@@ -8,6 +8,7 @@ FastAPI app in one call.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -62,18 +63,35 @@ def build_app(token: str, *, settings: Settings | None = None) -> FastAPI:
     registry.register(MemoryUpsertTool(core))
     registry.register(AskUserTool())
 
-    # TTS: try to start VOICEVOX if the binary is configured.
+    # TTS: connect to VOICEVOX if reachable, or spawn from binary.
     tts: VoicevoxTTS | None = None
+    vv_port = int(os.environ.get("VOICEVOX_PORT", "50021"))
     vv_bin = os.environ.get("VOICEVOX_BIN", "")
-    if vv_bin and Path(vv_bin).exists():
-        tts = VoicevoxTTS(binary=Path(vv_bin))
+    # First check if VOICEVOX is already running (dev workflow: started
+    # separately so model stays warm across daemon restarts).
+    try:
+        import httpx
+
+        r = httpx.get(f"http://127.0.0.1:{vv_port}/version", timeout=2.0)
+        if r.status_code == 200:
+            sys.stderr.write(
+                f"[factory] VOICEVOX already running (v{r.text.strip()}) — reusing\n"
+            )
+            tts = VoicevoxTTS(host="127.0.0.1", port=vv_port, speaker=1)
+    except Exception:
+        pass
+
+    if tts is None and vv_bin and Path(vv_bin).exists():
+        tts = VoicevoxTTS(binary=Path(vv_bin), port=vv_port, speaker=1)
         try:
             tts.start()
+            sys.stderr.write("[factory] VOICEVOX spawned\n")
         except Exception as e:
-            import sys
-
             sys.stderr.write(f"[factory] VOICEVOX start failed: {e} — TTS disabled\n")
             tts = None
+
+    if tts is None:
+        sys.stderr.write("[factory] TTS disabled (no VOICEVOX)\n")
 
     turn_loop = TurnLoop(
         sessions=repo,
@@ -95,9 +113,16 @@ def build_app(token: str, *, settings: Settings | None = None) -> FastAPI:
     )
     scheduler = CronScheduler(db, callback=proactive.fire)
     registry.register(ScheduleRegisterTool(scheduler))
-    scheduler.start()
 
-    # Store scheduler on app state so __main__ can stop it on shutdown.
+    # Defer scheduler.start() until the event loop is running (uvicorn).
+    @app.on_event("startup")
+    async def _start_scheduler() -> None:
+        scheduler.start()
+
+    @app.on_event("shutdown")
+    async def _stop_scheduler() -> None:
+        scheduler.stop()
+
     app.state.scheduler = scheduler
 
     return app
