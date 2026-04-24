@@ -13,11 +13,13 @@
     "windows": [
       {
         "title": "desktop-ai-agent",
-        "width": 400,
-        "height": 600,
+        "width": 300,
+        "height": 420,
         "transparent": true,
         "decorations": false,
-        "alwaysOnTop": true
+        "alwaysOnTop": true,
+        "resizable": false,
+        "skipTaskbar": true
       }
     ],
     "security": {
