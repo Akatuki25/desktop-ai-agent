@@ -35,6 +35,16 @@ def build_system_prompt(
         ' (e.g. "5分後", "30分後"), calculate the absolute time from'
         " the current time above, then convert it to a cron expression."
         " For one-shot tasks, use the exact minute/hour/day fields.",
+        "## CRITICAL: Tool usage rules\n"
+        "- You MUST actually call tools using the tool_call mechanism."
+        " NEVER pretend you called a tool by writing about it in text.\n"
+        "- If you need to search memory, CALL memory.search — do not"
+        " fabricate results.\n"
+        "- If you need to register a schedule, CALL schedule.register_task"
+        " — do not just say you did it.\n"
+        "- If a tool call fails, tell the user honestly.\n"
+        "- NEVER claim you performed an action that you did not actually"
+        " execute through a tool call.",
     ]
 
     core_items = core.all()
