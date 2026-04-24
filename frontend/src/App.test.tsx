@@ -1,16 +1,26 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, describe, expect, it } from "vitest";
 import { App } from "./App";
+import { useCharacterStore, useConnectionStore } from "./store";
 
 describe("App", () => {
-  it("renders header and shows closed status without daemon params", () => {
-    render(<App />);
-    expect(screen.getByRole("heading", { name: /desktop-ai-agent/i })).toBeInTheDocument();
-    expect(screen.getByTestId("status")).toHaveTextContent("status: closed");
+  beforeEach(() => {
+    useCharacterStore.setState({ agentState: "idle", emotion: "neutral" });
+    useConnectionStore.setState({ state: "idle" });
   });
 
-  it("exposes a labelled message input", () => {
+  it("renders the character sprite", async () => {
     render(<App />);
-    expect(screen.getByLabelText("message")).toBeInTheDocument();
+    await waitFor(() => {
+      const img = document.querySelector("img");
+      expect(img).not.toBeNull();
+    });
+  });
+
+  it("hides the input when not connected", async () => {
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.queryByLabelText("message")).toBeNull();
+    });
   });
 });

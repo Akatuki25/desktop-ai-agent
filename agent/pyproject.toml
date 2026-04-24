@@ -9,6 +9,7 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "websockets>=13",
+    "apscheduler>=3.11.2",
 ]
 
 [project.scripts]

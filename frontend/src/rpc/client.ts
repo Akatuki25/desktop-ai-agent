@@ -27,6 +27,7 @@ export interface RpcClientOptions {
   token: string;
   onEvent: (evt: RpcEvent) => void;
   onStatus?: (s: RpcStatus) => void;
+  onBinary?: (data: ArrayBuffer) => void;
 }
 
 export function createRpcClient(opts: RpcClientOptions): RpcClient {
@@ -36,7 +37,12 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
   ws.onopen = () => opts.onStatus?.("open");
   ws.onclose = () => opts.onStatus?.("closed");
   ws.onerror = () => opts.onStatus?.("closed");
+  ws.binaryType = "arraybuffer";
   ws.onmessage = (ev) => {
+    if (ev.data instanceof ArrayBuffer) {
+      opts.onBinary?.(ev.data);
+      return;
+    }
     try {
       const msg = JSON.parse(ev.data as string);
       if (typeof msg.method === "string") {
