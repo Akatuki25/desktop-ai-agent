@@ -37,6 +37,12 @@ class ProactiveDriver:
 
     async def fire(self, prompt: str) -> None:
         """Create a proactive session and stream the LLM's response."""
+        try:
+            await self._fire_inner(prompt)
+        except Exception as e:
+            sys.stderr.write(f"[proactive] error during fire: {e}\n")
+
+    async def _fire_inner(self, prompt: str) -> None:
         session = self._repo.create("proactive")
         self._repo.append_message(session.id, "system", prompt)
 

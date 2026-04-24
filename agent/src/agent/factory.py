@@ -54,7 +54,10 @@ def build_app(token: str, *, settings: Settings | None = None) -> FastAPI:
     if not behavior.all():
         behavior.set("tone", "warm and concise")
 
-    llm = make_llm_backend(settings)
+    from agent.llm.locked import LockedLLMBackend
+
+    raw_llm = make_llm_backend(settings)
+    llm = LockedLLMBackend(raw_llm)
 
     # Build tool registry with built-in tools.
     search = MemorySearch(db)
