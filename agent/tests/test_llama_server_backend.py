@@ -100,6 +100,15 @@ async def test_reasoning_content_field_is_routed_to_thinking_buffer() -> None:
     assert "".join(main) == "final answer"
 
 
+def test_streaming_client_has_unbounded_read_timeout() -> None:
+    # Regression guard: a single float passed to httpx.AsyncClient applies
+    # to read too, which kills long-TTFT cold-start streams.
+    backend = LlamaServerBackend(base_url="http://test", timeout_s=5.0)
+    client = backend._make_client()
+    assert client.timeout.read is None
+    assert client.timeout.connect == 5.0
+
+
 @pytest.mark.asyncio
 async def test_done_sentinel_terminates_stream() -> None:
     body = _sse_lines(
