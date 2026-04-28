@@ -102,6 +102,8 @@ async def _dispatch(
 
     if method == "session.send_text":
         text = str(params.get("text", ""))
+        # Per-turn TTS sequence counter (boxed so the inner loop can mutate).
+        tts_seq_counter = [0]
         if turn_loop is None:
             # Phase 0 fallback for tests and bare-bones smoke checks.
             await _send_say(ws, f"echo: {text}", is_thinking=False)
@@ -137,10 +139,15 @@ async def _dispatch(
                         },
                     )
                 elif evt.kind == "tts":
-                    # Send TTS audio as a binary WS frame.
-                    # Tag byte 0x02 = tts, then 8 bytes seq (0 for now),
-                    # then WAV payload.
-                    tag = b"\x02" + b"\x00" * 8 + evt.audio_wav
+                    # Send TTS audio as a binary WS frame:
+                    #   tag (1 byte 0x02) + seq (8 bytes BE u64) + WAV
+                    # Each sentence is one frame (streaming TTS, see
+                    # SentenceSplitter). The client concatenates by
+                    # seq order; out-of-order frames stay rare since
+                    # synthesis is awaited sequentially.
+                    seq = tts_seq_counter[0]
+                    tts_seq_counter[0] += 1
+                    tag = b"\x02" + seq.to_bytes(8, "big") + evt.audio_wav
                     await ws.send_bytes(tag)
 
         if req_id is not None:
