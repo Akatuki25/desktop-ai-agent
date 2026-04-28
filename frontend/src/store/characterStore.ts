@@ -1,7 +1,14 @@
 import { create } from "zustand";
 
 export type AgentState = "idle" | "thinking" | "talking" | "listening" | "hidden";
-export type Emotion = "neutral" | "smile" | "think" | "surprise" | "sad" | "angry";
+export type Emotion =
+  | "neutral"
+  | "smile"
+  | "think"
+  | "surprise"
+  | "sad"
+  | "angry"
+  | "happy";
 
 interface CharacterStore {
   agentState: AgentState;

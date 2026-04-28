@@ -10,11 +10,13 @@ import {
 } from "./store";
 
 const VALID_EMOTIONS: ReadonlySet<Emotion> = new Set([
-  "neutral", "smile", "think", "surprise", "sad", "angry",
+  "neutral", "smile", "think", "surprise", "sad", "angry", "happy",
 ]);
 function isEmotion(v: unknown): v is Emotion {
   return typeof v === "string" && VALID_EMOTIONS.has(v as Emotion);
 }
+
+const IDLE_HAPPY_DELAY_MS = 60_000;
 
 export function App() {
   const setStatus = useConnectionStore((s) => s.setState);
@@ -24,18 +26,97 @@ export function App() {
 
   const [client, setClient] = useState<RpcClient | null>(null);
   const [draft, setDraft] = useState("");
+  const [isDraggingWindow, setIsDraggingWindow] = useState(false);
+  const [isIdleHappy, setIsIdleHappy] = useState(false);
 
-  // Main reply bubble — only the final LLM answer, not tool status.
+  // Main reply bubble: only the final LLM answer, not tool status.
   const [replyText, setReplyText] = useState("");
   const [replyPending, setReplyPending] = useState(false);
 
-  // Separate tool status line (small, below the sprite).
+  // Separate tool status line below the sprite.
   const [toolStatus, setToolStatus] = useState("");
 
   // Auto-hide bubble after conversation ends.
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const clearHide = () => { if (hideTimer.current) { clearTimeout(hideTimer.current); hideTimer.current = null; } };
-  const scheduleHide = () => { clearHide(); hideTimer.current = setTimeout(() => { setReplyText(""); setToolStatus(""); }, 12000); };
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearHide = () => {
+    if (hideTimer.current) {
+      clearTimeout(hideTimer.current);
+      hideTimer.current = null;
+    }
+  };
+  const clearIdleTimer = () => {
+    if (idleTimer.current) {
+      clearTimeout(idleTimer.current);
+      idleTimer.current = null;
+    }
+  };
+  const scheduleHide = () => {
+    clearHide();
+    hideTimer.current = setTimeout(() => {
+      setReplyText("");
+      setToolStatus("");
+    }, 12000);
+  };
+  const markActive = useCallback(() => {
+    setIsIdleHappy(false);
+    clearIdleTimer();
+    idleTimer.current = setTimeout(() => {
+      setIsIdleHappy(true);
+    }, IDLE_HAPPY_DELAY_MS);
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const win = getCurrentWindow();
+        const saved = localStorage.getItem("windowPosition");
+        if (saved) {
+          const { x, y } = JSON.parse(saved);
+          const { PhysicalPosition } = await import("@tauri-apps/api/dpi");
+          await win.setPosition(new PhysicalPosition(x, y));
+        }
+      } catch {
+        // Ignore outside Tauri.
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    const save = async () => {
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const pos = await getCurrentWindow().outerPosition();
+        localStorage.setItem("windowPosition", JSON.stringify({ x: pos.x, y: pos.y }));
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener("beforeunload", save);
+    return () => window.removeEventListener("beforeunload", save);
+  }, []);
+
+  useEffect(() => {
+    markActive();
+    const handlePointerUp = () => setIsDraggingWindow(false);
+    const handleActivity = () => markActive();
+
+    window.addEventListener("pointerdown", handleActivity);
+    window.addEventListener("keydown", handleActivity);
+    window.addEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointercancel", handlePointerUp);
+    window.addEventListener("blur", handlePointerUp);
+
+    return () => {
+      clearIdleTimer();
+      window.removeEventListener("pointerdown", handleActivity);
+      window.removeEventListener("keydown", handleActivity);
+      window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+      window.removeEventListener("blur", handlePointerUp);
+    };
+  }, [markActive]);
 
   const handleEvent = useCallback((evt: RpcEvent) => {
     const character = useCharacterStore.getState();
@@ -46,10 +127,8 @@ export function App() {
       character.setAgentState(p.is_thinking ? "thinking" : "talking");
 
       if (p.is_thinking) {
-        // Tool status goes to the separate status line, not the bubble.
         setToolStatus((prev) => prev + (p.text ?? ""));
       } else {
-        // Actual reply goes to the bubble.
         setReplyText((prev) => prev + (p.text ?? ""));
       }
       clearHide();
@@ -73,7 +152,10 @@ export function App() {
     (async () => {
       const info: DaemonInfo | null = await resolveDaemonInfo();
       if (cancelled) return;
-      if (!info) { setStatus("closed"); return; }
+      if (!info) {
+        setStatus("closed");
+        return;
+      }
       setStatus("connecting");
       cur = createRpcClient({
         url: `ws://127.0.0.1:${info.port}/ws`,
@@ -94,7 +176,10 @@ export function App() {
       });
       setClient(cur);
     })();
-    return () => { cancelled = true; cur?.close(); };
+    return () => {
+      cancelled = true;
+      cur?.close();
+    };
   }, [setStatus, handleEvent]);
 
   const send = () => {
@@ -109,7 +194,26 @@ export function App() {
     setDraft("");
   };
 
-  const sprite = resolveSprite(agentState, emotion);
+  const startWindowDrag = useCallback(async () => {
+    setIsDraggingWindow(true);
+    markActive();
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      await getCurrentWindow().startDragging();
+    } catch {
+      // Ignore outside Tauri or when permission is unavailable.
+    }
+  }, [markActive]);
+
+  const activeEmotion: Emotion = isDraggingWindow
+    ? "angry"
+    : isIdleHappy && agentState === "idle"
+      ? "happy"
+      : emotion;
+  const sprite = resolveSprite(
+    isDraggingWindow ? "idle" : agentState,
+    activeEmotion,
+  );
 
   return (
     <div
@@ -124,10 +228,20 @@ export function App() {
         overflow: "hidden",
       }}
     >
-      {/* Fixed layout: bubble at top, character in middle, input at bottom */}
-
-      {/* Reply bubble — fixed position above the character */}
-      <div style={{ height: 100, display: "flex", alignItems: "flex-end", justifyContent: "center", padding: "0 10px" }}>
+      <div
+        onMouseDown={(e) => {
+          if (e.button !== 0) return;
+          void startWindowDrag();
+        }}
+        style={{
+          height: 100,
+          display: "flex",
+          alignItems: "flex-end",
+          justifyContent: "center",
+          padding: "0 10px",
+          cursor: "grab",
+        }}
+      >
         {replyText ? (
           <div
             style={{
@@ -152,8 +266,19 @@ export function App() {
         ) : null}
       </div>
 
-      {/* Character sprite — fixed position, never moves */}
-      <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div
+        onMouseDown={(e) => {
+          if (e.button !== 0) return;
+          void startWindowDrag();
+        }}
+        style={{
+          flex: 1,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          cursor: "grab",
+        }}
+      >
         {sprite && (
           <img
             src={sprite}
@@ -164,23 +289,28 @@ export function App() {
         )}
       </div>
 
-      {/* Tool status — small text below sprite, separate from bubble */}
       {toolStatus && (
-        <div style={{
-          textAlign: "center",
-          fontSize: 10,
-          opacity: 0.5,
-          fontStyle: "italic",
-          padding: "0 10px 2px",
-          whiteSpace: "nowrap",
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-        }}>
+        <div
+          onMouseDown={(e) => {
+            if (e.button !== 0) return;
+            void startWindowDrag();
+          }}
+          style={{
+            textAlign: "center",
+            fontSize: 10,
+            opacity: 0.5,
+            fontStyle: "italic",
+            padding: "0 10px 2px",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            cursor: "grab",
+          }}
+        >
           {toolStatus}
         </div>
       )}
 
-      {/* Input — fixed at bottom */}
       {status === "open" && (
         <div style={{ padding: "4px 10px 8px" }}>
           <input
