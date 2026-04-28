@@ -51,9 +51,9 @@ def build_app(token: str, *, settings: Settings | None = None) -> FastAPI:
     # Seed minimal persona/behavior on first run so the system prompt
     # isn't empty.
     if not core.all():
-        core.set("persona", "You are a friendly desktop companion agent.")
+        core.set("persona", "ずんだもん — 東北地方のずんだ餅の精霊。明るく元気で好奇心旺盛。")
     if not behavior.all():
-        behavior.set("tone", "warm and concise")
+        behavior.set("tone", "元気で親しみやすい。語尾に「〜のだ」を使う。2-3文で簡潔に。")
 
     from agent.llm.locked import LockedLLMBackend
 
