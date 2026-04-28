@@ -107,8 +107,23 @@ winget install --id Microsoft.EdgeWebView2Runtime -e
 .\scripts\setup.ps1 -SkipModel       # Qwen3.5 GGUF DL を飛ばす (5GB節約)
 .\scripts\setup.ps1 -SkipVoicevox    # VOICEVOX engine DL を飛ばす (2GB節約)
 .\scripts\setup.ps1 -NoExecPolicy    # ExecutionPolicy を触らない
+.\scripts\setup.ps1 -Model 4B        # 9B (~5.4GB) ではなく 4B (~2.4GB) を使う
 ```
 既定はフルセットアップ (no-skip)。"ゼロから動く" を担保するため。
+
+### モデルサイズの選択
+低スペック機 (RAM 不足、GPU 弱) で 9B が遅すぎる場合は `-Model 4B` で軽量版に切り替える:
+
+```powershell
+.\scripts\setup.ps1 -Model 4B
+```
+
+| サイズ | repo | ファイル | DL サイズ |
+|-------|------|---------|----------|
+| 9B (既定) | `unsloth/Qwen3.5-9B-GGUF` | `Qwen3.5-9B-Q4_K_M.gguf` | ~5.4 GB |
+| 4B | `unsloth/Qwen3.5-4B-GGUF` | `Qwen3.5-4B-Q4_K_M.gguf` | ~2.4 GB |
+
+`activate.ps1` は `models/` 配下を自動スキャンして見つかった GGUF を `LLAMA_MODEL` にセットします (9B 優先、無ければ 4B)。両方ある場合は 9B が選ばれるので、4B を強制したいなら `.env` に `LLAMA_MODEL=...\Qwen3.5-4B-Q4_K_M.gguf` を書きます。
 
 ### llama.cpp バージョンの強制
 `b8200` 未満は `--jinja` フラグも `delta.reasoning_content` フィールドもサポートしておらず、Qwen3 系の thinking 出力を完全に取りこぼします。`setup.ps1` は cached `llama-server.exe` の build 番号を `cmd /c llama-server.exe --version` で読み、b8200 未満なら自動で削除して b8798 を再取得します。
