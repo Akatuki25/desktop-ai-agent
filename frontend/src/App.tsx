@@ -36,6 +36,8 @@ export function App() {
   // Separate tool status line below the sprite.
   const [toolStatus, setToolStatus] = useState("");
 
+  const [lastUserText, setLastUserText] = useState("");
+
   // Auto-hide bubble after conversation ends.
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -60,6 +62,7 @@ export function App() {
     hideTimer.current = setTimeout(() => {
       setReplyText("");
       setToolStatus("");
+      setLastUserText("");
     }, 12000);
   };
   const markActive = useCallback(() => {
@@ -205,6 +208,7 @@ export function App() {
     clearHide();
     useCharacterStore.getState().setAgentState("thinking");
     client.send("session.send_text", { text });
+    setLastUserText(text);
     setDraft("");
   };
 
@@ -246,6 +250,27 @@ export function App() {
         overflow: "hidden",
       }}
     >
+      {lastUserText && (replyText || replyPending) && (
+        <div
+          onMouseDown={(e) => {
+            if (e.button !== 0) return;
+            void startWindowDrag();
+          }}
+          style={{
+            fontSize: 10,
+            color: "rgba(0,0,0,0.4)",
+            marginBottom: 4,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            maxWidth: 240,
+            padding: "0 10px",
+            cursor: "grab",
+          }}
+        >
+          {">"} {lastUserText}
+        </div>
+      )}
       <div
         onMouseDown={(e) => {
           if (e.button !== 0) return;
@@ -260,6 +285,7 @@ export function App() {
           cursor: "grab",
         }}
       >
+
         {replyText ? (
           <div
             style={{
@@ -269,18 +295,26 @@ export function App() {
               padding: "6px 10px",
               borderRadius: 10,
               background: "rgba(255,255,255,0.95)",
-              border: "1px solid rgba(0,0,0,0.1)",
-              boxShadow: "0 2px 6px rgba(0,0,0,0.06)",
+              border: "2px solid #86c166",  // ずんだもんカラー (緑)
+              boxShadow: "0 2px 8px rgba(134,193,102,0.15)",
               fontSize: 12,
               lineHeight: 1.5,
-              wordBreak: "break-word",
-              opacity: replyPending ? 0.8 : 1,
+              wordBreak: "break-word" as const,
+              position: "relative" as const,
             }}
           >
             {replyText}
+            <div style={{
+              width: 0,
+              height: 0,
+              borderLeft: "8px solid transparent",
+              borderRight: "8px solid transparent",
+              borderTop: "8px solid #86c166",
+              margin: "0 auto",
+            }} />
           </div>
         ) : replyPending ? (
-          <div style={{ fontSize: 11, opacity: 0.5 }}>...</div>
+           <span className="typing-cursor">▍</span>
         ) : null}
       </div>
 
