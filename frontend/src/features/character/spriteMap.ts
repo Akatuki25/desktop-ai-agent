@@ -6,8 +6,7 @@ import thinkImg from "./sprites/think.png";
 import surpriseImg from "./sprites/surprise.png";
 import sadImg from "./sprites/sad.png";
 import angryImg from "./sprites/angry.png";
-// happyImg is available as an extra smile variant if needed:
-// import happyImg from "./sprites/happy.png";
+import happyImg from "./sprites/happy.png";
 
 const emotionToSprite: Record<Emotion, string> = {
   neutral: neutralImg,
@@ -16,6 +15,7 @@ const emotionToSprite: Record<Emotion, string> = {
   surprise: surpriseImg,
   sad: sadImg,
   angry: angryImg,
+  happy: happyImg,
 };
 
 /**
