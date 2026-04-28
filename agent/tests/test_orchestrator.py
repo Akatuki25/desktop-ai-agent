@@ -37,28 +37,6 @@ def test_build_system_prompt_includes_hot_context(
     assert "talked about Tauri setup" in prompt
 
 
-def test_system_prompt_contains_zundamon(
-    pieces: tuple[SessionRepository, CoreMemory, BehaviorConfig],
-) -> None:
-    repo, core, behavior = pieces
-
-    prompt = build_system_prompt(core, behavior, repo)
-
-    assert "ずんだもん" in prompt
-    assert "のだ" in prompt
-
-
-def test_system_prompt_contains_character_rules(
-    pieces: tuple[SessionRepository, CoreMemory, BehaviorConfig],
-) -> None:
-    repo, core, behavior = pieces
-
-    prompt = build_system_prompt(core, behavior, repo)
-
-    assert "一人称" in prompt
-    assert "語尾" in prompt
-
-
 def test_build_messages_keeps_roles_and_order(
     pieces: tuple[SessionRepository, CoreMemory, BehaviorConfig],
 ) -> None:

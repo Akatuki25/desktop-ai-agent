@@ -28,6 +28,23 @@ from agent.tools.schedule_tools import ScheduleRegisterTool
 from agent.tools.web_tools import WebFetchTool, WebOpenTool, WebSearchTool
 from agent.voice.tts_voicevox import VoicevoxTTS
 
+_DEFAULT_PERSONA = "ずんだもん — 東北地方のずんだ餅の精霊。明るく元気で好奇心旺盛。"
+_DEFAULT_TONE = "元気で親しみやすい。語尾に「〜のだ」を使う。2-3文で簡潔に。"
+
+
+def seed_default_persona(core: CoreMemory, behavior: BehaviorConfig) -> None:
+    """Seed persona/tone on first run only — preserves user customization.
+
+    The system prompt expects core_memory and behavior_config to be
+    non-empty; without these defaults the prompt header looks lobotomized.
+    Idempotent: each row is only written if the table is empty, so a user
+    who has set their own persona doesn't get clobbered on daemon restart.
+    """
+    if not core.all():
+        core.set("persona", _DEFAULT_PERSONA)
+    if not behavior.all():
+        behavior.set("tone", _DEFAULT_TONE)
+
 
 def make_llm_backend(settings: Settings) -> LLMBackend:
     if settings.llm_backend == "llama_server":
@@ -48,12 +65,7 @@ def build_app(token: str, *, settings: Settings | None = None) -> FastAPI:
     core = CoreMemory(db)
     behavior = BehaviorConfig(db)
 
-    # Seed minimal persona/behavior on first run so the system prompt
-    # isn't empty.
-    if not core.all():
-        core.set("persona", "ずんだもん — 東北地方のずんだ餅の精霊。明るく元気で好奇心旺盛。")
-    if not behavior.all():
-        behavior.set("tone", "元気で親しみやすい。語尾に「〜のだ」を使う。2-3文で簡潔に。")
+    seed_default_persona(core, behavior)
 
     from agent.llm.locked import LockedLLMBackend
 
