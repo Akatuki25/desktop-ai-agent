@@ -4,3 +4,4 @@ export { useCharacterStore } from "./characterStore";
 export type { AgentState, Emotion } from "./characterStore";
 export { useConnectionStore } from "./connectionStore";
 export type { ConnectionState } from "./connectionStore";
+export { useVoiceStore } from "./voiceStore";

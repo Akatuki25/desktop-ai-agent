@@ -7,6 +7,12 @@ with `agent.say_end`. If the app is built without an orchestrator
 falls back to the Phase 0 echo behaviour so existing smoke tests
 don't regress.
 
+Phase 3: voice methods (voice.start / voice.stop) and binary mic
+frames (tag 0x01). voice.start opens a Deepgram STT session, mic
+frames feed PCM into it, voice.stop closes the session and runs
+the accumulated transcript through the same TurnLoop the text path
+uses — so TTS playback, tool calls, and persistence are unchanged.
+
 The server supports two auth mechanisms:
     - Authorization: Bearer <token> header (cmdline/curl clients)
     - Sec-WebSocket-Protocol: bearer.<token>  (browser WebSocket API)
@@ -24,6 +30,13 @@ class TurnLoopLike(Protocol):
     def run(self, user_text: str) -> AsyncIterator[Any]: ...
 
 
+class VoicePipelineLike(Protocol):
+    async def start_session(self) -> None: ...
+    async def feed_audio(self, pcm: bytes) -> None: ...
+    def stop_session(self) -> AsyncIterator[Any]: ...
+    def set_partial_callback(self, cb: Any) -> None: ...
+
+
 def _extract_token(ws: WebSocket) -> str | None:
     auth = ws.headers.get("authorization", "")
     if auth.startswith("Bearer "):
@@ -39,10 +52,16 @@ def _extract_token(ws: WebSocket) -> str | None:
     return None
 
 
-def create_app(token: str, *, turn_loop: TurnLoopLike | None = None) -> FastAPI:
+def create_app(
+    token: str,
+    *,
+    turn_loop: TurnLoopLike | None = None,
+    voice_pipeline: VoicePipelineLike | None = None,
+) -> FastAPI:
     app = FastAPI(title="desktop-ai-agent", version="0.0.0")
     app.state.token = token
     app.state.turn_loop = turn_loop
+    app.state.voice_pipeline = voice_pipeline
     # Active WS connections for broadcast (proactive notifications).
     app.state.clients: set[WebSocket] = set()  # type: ignore[misc]
 
@@ -83,18 +102,44 @@ def create_app(token: str, *, turn_loop: TurnLoopLike | None = None) -> FastAPI:
 
         try:
             while True:
-                msg: dict[str, Any] = await websocket.receive_json()
-                await _dispatch(websocket, msg, turn_loop)
+                # Mixed-frame handling: text frames carry JSON-RPC,
+                # binary frames carry tagged audio (mic = 0x01).
+                msg = await websocket.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    raise WebSocketDisconnect
+                if "text" in msg and msg["text"] is not None:
+                    import json as _json
+
+                    try:
+                        envelope = _json.loads(msg["text"])
+                    except _json.JSONDecodeError:
+                        continue
+                    await _dispatch(websocket, envelope, turn_loop, voice_pipeline)
+                elif "bytes" in msg and msg["bytes"] is not None:
+                    await _handle_binary(msg["bytes"], voice_pipeline)
         except WebSocketDisconnect:
             app.state.clients.discard(websocket)
 
     return app
 
 
+async def _handle_binary(
+    payload: bytes,
+    voice_pipeline: VoicePipelineLike | None,
+) -> None:
+    """Route a binary frame. Frame layout: tag (1B) + seq (8B LE u64) + payload."""
+    if voice_pipeline is None or len(payload) < 9:
+        return
+    tag = payload[0]
+    if tag == 0x01:  # mic PCM
+        await voice_pipeline.feed_audio(payload[9:])
+
+
 async def _dispatch(
     ws: WebSocket,
     msg: dict[str, Any],
     turn_loop: TurnLoopLike | None,
+    voice_pipeline: VoicePipelineLike | None,
 ) -> None:
     method = msg.get("method")
     params = msg.get("params") or {}
@@ -102,54 +147,39 @@ async def _dispatch(
 
     if method == "session.send_text":
         text = str(params.get("text", ""))
-        # Per-turn TTS sequence counter (boxed so the inner loop can mutate).
-        tts_seq_counter = [0]
         if turn_loop is None:
             # Phase 0 fallback for tests and bare-bones smoke checks.
             await _send_say(ws, f"echo: {text}", is_thinking=False)
             await _send_event(ws, "agent.say_end", {"message_id": "stub"})
         else:
-            async for evt in turn_loop.run(text):
-                if evt.kind == "delta":
-                    await _send_say(ws, evt.text, is_thinking=evt.is_thinking)
-                elif evt.kind == "end":
-                    await _send_event(
-                        ws, "agent.say_end", {"message_id": evt.message_id}
-                    )
-                elif evt.kind == "tool_request":
-                    await _send_event(
-                        ws,
-                        "tool.request_confirm",
-                        {
-                            "call_id": evt.call_id,
-                            "tool": evt.tool_name,
-                            "args": evt.arguments,
-                            "risk": evt.risk,
-                            "requires_confirmation": evt.requires_confirmation,
-                        },
-                    )
-                elif evt.kind == "tool_result":
-                    await _send_event(
-                        ws,
-                        "tool.result",
-                        {
-                            "call_id": evt.call_id,
-                            "ok": evt.ok,
-                            "summary": evt.summary,
-                        },
-                    )
-                elif evt.kind == "tts":
-                    # Send TTS audio as a binary WS frame:
-                    #   tag (1 byte 0x02) + seq (8 bytes BE u64) + WAV
-                    # Each sentence is one frame (streaming TTS, see
-                    # SentenceSplitter). The client concatenates by
-                    # seq order; out-of-order frames stay rare since
-                    # synthesis is awaited sequentially.
-                    seq = tts_seq_counter[0]
-                    tts_seq_counter[0] += 1
-                    tag = b"\x02" + seq.to_bytes(8, "big") + evt.audio_wav
-                    await ws.send_bytes(tag)
+            await _stream_turn_events(ws, turn_loop.run(text))
+        if req_id is not None:
+            await ws.send_json({"jsonrpc": "2.0", "id": req_id, "result": {"ok": True}})
+        return
 
+    if method == "voice.start":
+        if voice_pipeline is None:
+            await _send_method_error(ws, req_id, "voice pipeline not configured")
+            return
+
+        async def _on_partial(text: str) -> None:
+            await _send_event(ws, "voice.stt_partial", {"text": text})
+
+        voice_pipeline.set_partial_callback(_on_partial)
+        await voice_pipeline.start_session()
+        if req_id is not None:
+            await ws.send_json({"jsonrpc": "2.0", "id": req_id, "result": {"ok": True}})
+        return
+
+    if method == "voice.stop":
+        if voice_pipeline is None:
+            await _send_method_error(ws, req_id, "voice pipeline not configured")
+            return
+        # stop_session yields TurnEvents from the LLM turn the final
+        # transcript triggered. Stream them through the same path text
+        # uses so TTS, tool calls, persistence all just work.
+        await _stream_turn_events(ws, voice_pipeline.stop_session())
+        voice_pipeline.set_partial_callback(None)
         if req_id is not None:
             await ws.send_json({"jsonrpc": "2.0", "id": req_id, "result": {"ok": True}})
         return
@@ -162,6 +192,63 @@ async def _dispatch(
                 "error": {"code": -32601, "message": f"method not found: {method}"},
             }
         )
+
+
+async def _stream_turn_events(
+    ws: WebSocket,
+    events: AsyncIterator[Any],
+) -> None:
+    """Pump TurnEvents to the WS in the canonical wire format. Used by
+    both session.send_text and voice.stop so they're indistinguishable
+    from the client's perspective once the user's input lands."""
+    tts_seq_counter = [0]
+    async for evt in events:
+        if evt.kind == "delta":
+            await _send_say(ws, evt.text, is_thinking=evt.is_thinking)
+        elif evt.kind == "end":
+            await _send_event(ws, "agent.say_end", {"message_id": evt.message_id})
+        elif evt.kind == "tool_request":
+            await _send_event(
+                ws,
+                "tool.request_confirm",
+                {
+                    "call_id": evt.call_id,
+                    "tool": evt.tool_name,
+                    "args": evt.arguments,
+                    "risk": evt.risk,
+                    "requires_confirmation": evt.requires_confirmation,
+                },
+            )
+        elif evt.kind == "tool_result":
+            await _send_event(
+                ws,
+                "tool.result",
+                {
+                    "call_id": evt.call_id,
+                    "ok": evt.ok,
+                    "summary": evt.summary,
+                },
+            )
+        elif evt.kind == "tts":
+            # Binary frame: tag (0x02) + seq (8B BE u64) + WAV.
+            seq = tts_seq_counter[0]
+            tts_seq_counter[0] += 1
+            tag = b"\x02" + seq.to_bytes(8, "big") + evt.audio_wav
+            await ws.send_bytes(tag)
+
+
+async def _send_method_error(
+    ws: WebSocket, req_id: object, message: str
+) -> None:
+    if req_id is None:
+        return
+    await ws.send_json(
+        {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32000, "message": message},
+        }
+    )
 
 
 async def _send_say(ws: WebSocket, text: str, *, is_thinking: bool) -> None:
