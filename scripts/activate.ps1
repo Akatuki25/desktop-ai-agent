@@ -4,7 +4,8 @@
 #   . .\scripts\activate.ps1
 #
 # Sets PLAYWRIGHT_BROWSERS_PATH, LLAMA_SERVER_BIN, LLAMA_MODEL, VOICEVOX_BIN,
-# AGENT_DATA_DIR and loads repo\.env (KEY=VALUE lines) into the current session.
+# AGENT_DATA_DIR, surfaces fnm/node/pnpm/cargo/uv on PATH, and loads
+# repo\.env (KEY=VALUE lines) into the current session.
 
 $ErrorActionPreference = 'Stop'
 
@@ -16,30 +17,52 @@ $env:LLAMA_SERVER_BIN         = Join-Path $repo 'vendor\llama.cpp\llama-server.e
 $env:VOICEVOX_BIN             = Join-Path $repo 'vendor\voicevox\run.exe'
 $env:AGENT_DATA_DIR           = Join-Path $env:APPDATA 'desktop-ai-agent'
 
-# LLAMA_MODEL resolution:
-#   1. Honor an existing LLAMA_MODEL env var (e.g. set in .env to override)
-#   2. Otherwise auto-detect the GGUF in models/. Prefer 9B, fall back
-#      to 4B, then any Qwen3.5 GGUF. Fail-soft: if nothing is there
-#      yet, leave LLAMA_MODEL pointing at the 9B path so setup.ps1
-#      messages still make sense.
+# ---- Load .env first so it can override LLAMA_MODEL / MODEL_SIZE below ----
+$envFile = Join-Path $repo '.env'
+if (Test-Path $envFile) {
+    Get-Content $envFile | ForEach-Object {
+        $line = $_.Trim()
+        if ($line -and -not $line.StartsWith('#') -and $line -match '^([^=]+)=(.*)$') {
+            $name  = $Matches[1].Trim()
+            $value = $Matches[2].Trim().Trim('"').Trim("'")
+            [Environment]::SetEnvironmentVariable($name, $value, 'Process')
+        }
+    }
+    Write-Host "  .env loaded" -ForegroundColor DarkGray
+} else {
+    Write-Host "  .env not found (copy .env.example to .env)" -ForegroundColor Yellow
+}
+
+# ---- LLAMA_MODEL resolution ----
+# Priority:
+#   1. LLAMA_MODEL already set (env var or .env, absolute path) — honored as-is
+#      if the file exists.
+#   2. MODEL_SIZE env var (9B / 4B) — pick the matching file in models/.
+#      This is the easy way to switch after running setup.ps1 -Model 4B
+#      while keeping a 9B GGUF on disk.
+#   3. Auto-detect: prefer 9B, then 4B, then any Qwen3.5 GGUF.
+#   4. Fail-soft fallback: point at the 9B path so the missing-asset
+#      warning below makes sense.
 $modelsDir = Join-Path $repo 'models'
-$pre = $env:LLAMA_MODEL
-if ([string]::IsNullOrWhiteSpace($pre) -or -not (Test-Path $pre)) {
-    $candidates = @(
-        (Join-Path $modelsDir 'Qwen3.5-9B-Q4_K_M.gguf')
-        (Join-Path $modelsDir 'Qwen3.5-4B-Q4_K_M.gguf')
-    )
-    $picked = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if (-not $picked) {
-        # Last resort: any Qwen3.5 GGUF in models/
-        $picked = Get-ChildItem $modelsDir -Filter 'Qwen3.5-*.gguf' -ErrorAction SilentlyContinue `
-            | Select-Object -First 1 -ExpandProperty FullName
-    }
-    if ($picked) {
-        $env:LLAMA_MODEL = $picked
-    } else {
-        $env:LLAMA_MODEL = Join-Path $modelsDir 'Qwen3.5-9B-Q4_K_M.gguf'
-    }
+$model9b   = Join-Path $modelsDir 'Qwen3.5-9B-Q4_K_M.gguf'
+$model4b   = Join-Path $modelsDir 'Qwen3.5-4B-Q4_K_M.gguf'
+$pre       = $env:LLAMA_MODEL
+$sizeHint  = $env:MODEL_SIZE
+
+if (-not [string]::IsNullOrWhiteSpace($pre) -and (Test-Path $pre)) {
+    # Honor explicit override.
+} elseif ($sizeHint -eq '4B' -and (Test-Path $model4b)) {
+    $env:LLAMA_MODEL = $model4b
+} elseif ($sizeHint -eq '9B' -and (Test-Path $model9b)) {
+    $env:LLAMA_MODEL = $model9b
+} elseif (Test-Path $model9b) {
+    $env:LLAMA_MODEL = $model9b
+} elseif (Test-Path $model4b) {
+    $env:LLAMA_MODEL = $model4b
+} else {
+    $any = Get-ChildItem $modelsDir -Filter 'Qwen3.5-*.gguf' -ErrorAction SilentlyContinue `
+        | Select-Object -First 1 -ExpandProperty FullName
+    if ($any) { $env:LLAMA_MODEL = $any } else { $env:LLAMA_MODEL = $model9b }
 }
 
 # Surface per-user toolchains on PATH so pnpm / cargo / uv work in this shell.
@@ -76,21 +99,6 @@ if (Get-Command fnm -ErrorAction SilentlyContinue) {
     }
 }
 
-$envFile = Join-Path $repo '.env'
-if (Test-Path $envFile) {
-    Get-Content $envFile | ForEach-Object {
-        $line = $_.Trim()
-        if ($line -and -not $line.StartsWith('#') -and $line -match '^([^=]+)=(.*)$') {
-            $name  = $Matches[1].Trim()
-            $value = $Matches[2].Trim().Trim('"').Trim("'")
-            [Environment]::SetEnvironmentVariable($name, $value, 'Process')
-        }
-    }
-    Write-Host "  .env loaded" -ForegroundColor DarkGray
-} else {
-    Write-Host "  .env not found (copy .env.example to .env)" -ForegroundColor Yellow
-}
-
 # Warn (don't fail) about missing project-local assets — setup.ps1 handles install.
 $missing = @()
 if (-not (Test-Path $env:LLAMA_SERVER_BIN)) { $missing += 'llama-server.exe' }
@@ -101,4 +109,6 @@ if ($missing.Count -gt 0) {
 }
 
 Write-Host "desktop-ai-agent env activated" -ForegroundColor Green
-Write-Host "  REPO_ROOT = $repo" -ForegroundColor DarkGray
+Write-Host "  REPO_ROOT   = $repo" -ForegroundColor DarkGray
+$modelLabel = Split-Path $env:LLAMA_MODEL -Leaf
+Write-Host "  LLAMA_MODEL = $modelLabel" -ForegroundColor DarkGray

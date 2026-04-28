@@ -123,7 +123,30 @@ winget install --id Microsoft.EdgeWebView2Runtime -e
 | 9B (既定) | `unsloth/Qwen3.5-9B-GGUF` | `Qwen3.5-9B-Q4_K_M.gguf` | ~5.4 GB |
 | 4B | `unsloth/Qwen3.5-4B-GGUF` | `Qwen3.5-4B-Q4_K_M.gguf` | ~2.4 GB |
 
-`activate.ps1` は `models/` 配下を自動スキャンして見つかった GGUF を `LLAMA_MODEL` にセットします (9B 優先、無ければ 4B)。両方ある場合は 9B が選ばれるので、4B を強制したいなら `.env` に `LLAMA_MODEL=...\Qwen3.5-4B-Q4_K_M.gguf` を書きます。
+### 既に 9B を入れた後で 4B に切り替えたい
+
+(動作テストして 9B が重すぎたケース)
+
+```powershell
+# 1. 4B を追加 DL (9B はそのまま残る)
+.\scripts\setup.ps1 -Model 4B
+
+# 2a. 4B を優先するよう .env に MODEL_SIZE を書く (推奨)
+notepad .env
+#   MODEL_SIZE=4B
+```
+
+または `.env` を触らず 9B ファイルを削除しても良い:
+```powershell
+Remove-Item models\Qwen3.5-9B-Q4_K_M.gguf
+```
+
+### LLAMA_MODEL 解決の優先順位 (activate.ps1)
+
+1. `.env` または環境変数の **`LLAMA_MODEL`** が絶対パスで設定済 → そのまま使う
+2. **`MODEL_SIZE`** (`9B` / `4B`) → 該当ファイルが models/ にあれば選択
+3. 自動検出 → 9B が models/ にあれば 9B、なければ 4B、それ以外の Qwen3.5 GGUF
+4. fallback → 9B のパス文字列をセット (実体無し → setup.ps1 を促す警告)
 
 ### llama.cpp バージョンの強制
 `b8200` 未満は `--jinja` フラグも `delta.reasoning_content` フィールドもサポートしておらず、Qwen3 系の thinking 出力を完全に取りこぼします。`setup.ps1` は cached `llama-server.exe` の build 番号を `cmd /c llama-server.exe --version` で読み、b8200 未満なら自動で削除して b8798 を再取得します。
