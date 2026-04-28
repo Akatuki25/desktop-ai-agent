@@ -83,7 +83,12 @@ export function App() {
         onBinary: (data: ArrayBuffer) => {
           const view = new Uint8Array(data);
           if (view[0] === 0x02 && view.length > 9) {
-            playWav(data.slice(9)).catch(console.error);
+            // Bytes 1..8 are the BE u64 sequence number; we only
+            // need the low 32 bits (32-bit Number is plenty for
+            // per-turn sequencing).
+            const seq =
+              (view[5] << 24) | (view[6] << 16) | (view[7] << 8) | view[8];
+            playWav(data.slice(9), seq).catch(console.error);
           }
         },
       });

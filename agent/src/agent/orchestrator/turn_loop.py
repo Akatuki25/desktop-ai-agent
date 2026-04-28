@@ -29,6 +29,7 @@ from agent.orchestrator.prompt import build_messages, build_system_prompt
 from agent.orchestrator.session import SessionManager
 from agent.tools.base import ToolResult
 from agent.tools.registry import ToolRegistry
+from agent.voice.sentence_splitter import SentenceSplitter
 from agent.voice.tts_voicevox import VoicevoxTTS
 
 MAX_TOOL_STEPS = 5
@@ -123,6 +124,7 @@ class TurnLoop:
             main_buf: list[str] = []
             thinking_buf: list[str] = []
             tool_calls: list[ToolCallDelta] = []
+            splitter = SentenceSplitter()
 
             async for chunk in self._llm.chat_stream(
                 prompt, tools=tool_schemas, thinking=False
@@ -141,6 +143,22 @@ class TurnLoop:
                     text=chunk.text,
                     is_thinking=chunk.is_thinking,
                 )
+                # Streaming TTS: synthesize each completed sentence as
+                # it arrives. Each WAV is ~tens-of-KB instead of one
+                # multi-MB blob at the end, which both improves
+                # perceived latency and stays under any reasonable
+                # WS frame size limit.
+                if not chunk.is_thinking and self._tts is not None:
+                    for sentence in splitter.feed(chunk.text):
+                        async for ev in self._synthesize(sentence):
+                            yield ev
+
+            # Flush any tail fragment (no terminator at end).
+            if self._tts is not None:
+                tail = splitter.flush()
+                if tail:
+                    async for ev in self._synthesize(tail):
+                        yield ev
 
             # If no tool calls, we're done.
             if not tool_calls:
@@ -234,19 +252,22 @@ class TurnLoop:
         final_text = "".join(main_buf).strip()
         if final_text:
             stored = self._sessions.append_message(session.id, "assistant", final_text)
-
-            # TTS before end so the client can play audio while
-            # rendering the final bubble. agent.say_end is the
-            # last event — clients stop listening after it.
-            if self._tts is not None:
-                try:
-                    wav = await self._tts.synthesize(final_text)
-                    yield TTSEvent(audio_wav=wav)
-                except Exception as e:
-                    import sys
-
-                    sys.stderr.write(f"[voice] TTS synthesis failed: {e}\n")
-
             yield SayEvent(kind="end", message_id=str(stored.id))
         else:
             yield SayEvent(kind="end", message_id="")
+
+    async def _synthesize(self, text: str) -> AsyncIterator[TTSEvent]:
+        """Run VOICEVOX on a single sentence and yield a TTSEvent.
+
+        Failures are logged but never raise — TTS is best-effort,
+        text streaming must continue regardless.
+        """
+        if self._tts is None or not text:
+            return
+        try:
+            wav = await self._tts.synthesize(text)
+            yield TTSEvent(audio_wav=wav)
+        except Exception as e:
+            import sys
+
+            sys.stderr.write(f"[voice] TTS synthesis failed for {text[:30]!r}: {e}\n")
