@@ -39,6 +39,10 @@ export function App() {
   // Auto-hide bubble after conversation ends.
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Keep the angry sprite up briefly after release so a quick drag
+  // doesn't flicker back to neutral on the same frame.
+  const dragReleaseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const DRAG_LINGER_MS = 300;
   const clearHide = () => {
     if (hideTimer.current) {
       clearTimeout(hideTimer.current);
@@ -99,7 +103,13 @@ export function App() {
 
   useEffect(() => {
     markActive();
-    const handlePointerUp = () => setIsDraggingWindow(false);
+    const handlePointerUp = () => {
+      if (dragReleaseTimer.current) clearTimeout(dragReleaseTimer.current);
+      dragReleaseTimer.current = setTimeout(() => {
+        setIsDraggingWindow(false);
+        dragReleaseTimer.current = null;
+      }, DRAG_LINGER_MS);
+    };
     const handleActivity = () => markActive();
 
     window.addEventListener("pointerdown", handleActivity);
@@ -110,6 +120,10 @@ export function App() {
 
     return () => {
       clearIdleTimer();
+      if (dragReleaseTimer.current) {
+        clearTimeout(dragReleaseTimer.current);
+        dragReleaseTimer.current = null;
+      }
       window.removeEventListener("pointerdown", handleActivity);
       window.removeEventListener("keydown", handleActivity);
       window.removeEventListener("pointerup", handlePointerUp);
@@ -195,6 +209,10 @@ export function App() {
   };
 
   const startWindowDrag = useCallback(async () => {
+    if (dragReleaseTimer.current) {
+      clearTimeout(dragReleaseTimer.current);
+      dragReleaseTimer.current = null;
+    }
     setIsDraggingWindow(true);
     markActive();
     try {
