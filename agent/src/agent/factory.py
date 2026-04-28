@@ -25,6 +25,7 @@ from agent.tools import ToolRegistry
 from agent.tools.ask_user import AskUserTool
 from agent.tools.memory_tools import MemorySearchTool, MemoryUpsertTool
 from agent.tools.schedule_tools import ScheduleRegisterTool
+from agent.tools.web_tools import WebFetchTool, WebOpenTool, WebSearchTool
 from agent.voice.tts_voicevox import VoicevoxTTS
 
 
@@ -65,6 +66,9 @@ def build_app(token: str, *, settings: Settings | None = None) -> FastAPI:
     registry.register(MemorySearchTool(search))
     registry.register(MemoryUpsertTool(core))
     registry.register(AskUserTool())
+    registry.register(WebSearchTool())
+    registry.register(WebFetchTool())
+    registry.register(WebOpenTool())
 
     # TTS: connect to VOICEVOX if reachable, or spawn from binary.
     tts: VoicevoxTTS | None = None
