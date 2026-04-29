@@ -217,6 +217,17 @@ export function App() {
     setDraft("");
   };
 
+  const closeWindow = useCallback(async () => {
+    try {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      // Triggers Tauri's normal close path → daemon SIGTERM → uvicorn
+      // graceful shutdown → on_event("shutdown") summarizes the session.
+      await getCurrentWindow().close();
+    } catch {
+      // Fallthrough: outside Tauri (e.g. plain vite dev) just no-op.
+    }
+  }, []);
+
   const startWindowDrag = useCallback(async () => {
     if (dragReleaseTimer.current) {
       clearTimeout(dragReleaseTimer.current);
@@ -255,6 +266,34 @@ export function App() {
         overflow: "hidden",
       }}
     >
+      <button
+        type="button"
+        aria-label="close"
+        title="閉じる (会話を保存して終了)"
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={() => void closeWindow()}
+        style={{
+          position: "absolute",
+          top: 4,
+          right: 4,
+          width: 18,
+          height: 18,
+          padding: 0,
+          border: "none",
+          borderRadius: "50%",
+          background: "rgba(0,0,0,0.35)",
+          color: "#fff",
+          fontSize: 11,
+          lineHeight: 1,
+          cursor: "pointer",
+          zIndex: 10,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        ×
+      </button>
       {lastUserText && (replyText || replyPending) && (
         <div
           onMouseDown={(e) => {

@@ -10,12 +10,14 @@ Handles:
 from __future__ import annotations
 
 import asyncio
+import sys
 import time
 
 from agent.llm.backend import LLMBackend, Message
 from agent.memory import Session, SessionRepository
 
 _IDLE_TIMEOUT_S = 600  # 10 minutes per spec §3.6
+_IDLE_WATCHER_INTERVAL_S = 60.0  # poll cadence; cheap because it's just a SELECT
 
 
 class SessionManager:
@@ -53,6 +55,36 @@ class SessionManager:
         s = self._repo.open_chat()
         if s is not None:
             await self._close_and_summarize(s.id)
+
+    async def run_idle_watcher(
+        self, *, interval_s: float = _IDLE_WATCHER_INTERVAL_S
+    ) -> None:
+        """Background polling loop: closes the open chat once it goes idle.
+
+        The synchronous `current_or_new_chat` path only fires a close on the
+        next user turn, which means a user who walks away never gets their
+        session summarized. This watcher fills that gap by polling every
+        `interval_s` and closing anything past `_idle_timeout_s`.
+
+        Returns when cancelled. Summarize errors are caught and logged so
+        a single bad turn can't kill the watcher.
+        """
+        while True:
+            try:
+                await asyncio.sleep(interval_s)
+            except asyncio.CancelledError:
+                break
+            try:
+                existing = self._repo.open_chat()
+                if existing is None:
+                    continue
+                last = self._last_activity.get(
+                    existing.id, existing.started_at / 1000
+                )
+                if time.time() - last > self._idle_timeout_s:
+                    await self._close_and_summarize(existing.id)
+            except Exception as e:
+                sys.stderr.write(f"[session] idle watcher error: {e}\n")
 
     async def _close_and_summarize(self, session_id: str) -> None:
         messages = self._repo.recent_messages(session_id, limit=50)
