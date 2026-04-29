@@ -21,7 +21,6 @@ import secrets
 import socket
 import sys
 from pathlib import Path
-from types import FrameType
 
 import uvicorn
 
@@ -40,7 +39,13 @@ def _data_dir() -> Path:
     env = os.environ.get("AGENT_DATA_DIR")
     if env:
         return Path(env)
-    return Path.home() / "AppData" / "Roaming" / "desktop-ai-agent"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "desktop-ai-agent"
+    if sys.platform == "win32":
+        return Path.home() / "AppData" / "Roaming" / "desktop-ai-agent"
+    xdg = os.environ.get("XDG_DATA_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".local" / "share"
+    return base / "desktop-ai-agent"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -73,23 +78,30 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(f"[agent] LLAMA_SERVER_BIN not found: {llama_bin}")
         if not llama_model.exists():
             raise SystemExit(f"[agent] LLAMA_MODEL not found: {llama_model}")
+        # GPU offload: explicit env wins; otherwise default to all-layers
+        # on macOS (Metal-enabled prebuilt) and CPU-only on Windows
+        # (the win-cpu-x64 build has no GPU support).
+        ngl_env = os.environ.get("LLAMA_NGL", "").strip()
+        if ngl_env:
+            gpu_layers: int | None = int(ngl_env)
+        elif sys.platform == "darwin":
+            gpu_layers = 99
+        else:
+            gpu_layers = None
         llama_proc = LlamaServerProcess(
-            LlamaServerConfig(binary=llama_bin, model=llama_model)
+            LlamaServerConfig(
+                binary=llama_bin, model=llama_model, gpu_layers=gpu_layers
+            )
         )
         llama_proc.start()
         llama_url = llama_proc.base_url
 
-    def _shutdown(signum: int, _frame: FrameType | None) -> None:
-        sys.stderr.write(f"[agent] signal {signum}, stopping\n")
-        if llama_proc is not None:
-            llama_proc.stop()
-        sys.exit(0)
-
-    if sys.platform != "win32":
-        import signal
-
-        signal.signal(signal.SIGTERM, _shutdown)
-        signal.signal(signal.SIGINT, _shutdown)
+    # Note: we deliberately don't install our own SIGTERM/SIGINT handlers.
+    # uvicorn already does so internally — its handler triggers the
+    # FastAPI lifespan shutdown (which runs our session.close_current /
+    # idle-watcher cancellation). Installing our own handler here would
+    # shadow uvicorn's and bypass `on_event("shutdown")` entirely. The
+    # `finally` below still kills llama-server after uvicorn returns.
 
     try:
         # --- Build the full app via factory ---

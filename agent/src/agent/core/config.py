@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,3 +27,14 @@ class Settings(BaseSettings):
     llm_backend: str = Field(default="fake")
     llama_server_url: str = Field(default="http://127.0.0.1:8080")
     llama_model_name: str = Field(default="qwen")
+
+    # Deepgram STT credential. The convention in .env.example is the
+    # bare DEEPGRAM_API_KEY (third-party providers use unprefixed names);
+    # AGENT_DEEPGRAM_API_KEY also works for consistency with the rest of
+    # the AGENT_-prefixed knobs.
+    deepgram_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "AGENT_DEEPGRAM_API_KEY", "DEEPGRAM_API_KEY"
+        ),
+    )

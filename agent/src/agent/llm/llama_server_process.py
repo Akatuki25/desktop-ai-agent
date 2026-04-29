@@ -27,6 +27,10 @@ class LlamaServerConfig:
     port: int = 0  # 0 = pick free
     ctx_size: int = 8192
     threads: int | None = None
+    # Number of layers to offload to GPU. On Apple Silicon (Metal) and
+    # CUDA builds, 99 = "all layers". Leave as None to let llama-server
+    # pick its own default (which on a CPU-only build is 0).
+    gpu_layers: int | None = None
     startup_timeout_s: float = 120.0
 
 
@@ -70,6 +74,8 @@ class LlamaServerProcess:
         ]
         if self._config.threads is not None:
             args += ["-t", str(self._config.threads)]
+        if self._config.gpu_layers is not None:
+            args += ["-ngl", str(self._config.gpu_layers)]
 
         sys.stderr.write(f"[agent] spawning llama-server: {' '.join(args)}\n")
         self._process = subprocess.Popen(

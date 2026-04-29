@@ -8,9 +8,10 @@
 #   prerequisites cause a hard failure with a precise remediation command.
 #
 # Usage:
-#   .\scripts\setup.ps1                 # full setup
+#   .\scripts\setup.ps1                 # full setup with 9B model
+#   .\scripts\setup.ps1 -Model 4B       # use the lighter 4B model (~2.4GB)
 #   .\scripts\setup.ps1 -SkipToolchain  # skip rustup/fnm/uv install
-#   .\scripts\setup.ps1 -SkipModel      # skip GGUF model download (~5GB)
+#   .\scripts\setup.ps1 -SkipModel      # skip GGUF model download
 #   .\scripts\setup.ps1 -SkipVoicevox   # skip VOICEVOX engine
 #   .\scripts\setup.ps1 -NoExecPolicy   # do not touch ExecutionPolicy
 
@@ -19,7 +20,9 @@ param(
     [switch]$SkipToolchain,
     [switch]$SkipModel,
     [switch]$SkipVoicevox,
-    [switch]$NoExecPolicy
+    [switch]$NoExecPolicy,
+    [ValidateSet('9B', '4B')]
+    [string]$Model = '9B'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -34,11 +37,16 @@ $LLAMA_RELEASE  = 'b8798'
 $LLAMA_ZIP      = "llama-$LLAMA_RELEASE-bin-win-cpu-x64.zip"
 $LLAMA_URL      = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_RELEASE/$LLAMA_ZIP"
 
-# unsloth/Qwen3.5-9B-GGUF is the actual current GGUF release for the
-# Qwen3.5 dense model family. The original spec said "Qwen3.5 8B" but
-# the closest published dense size is 9B; we use that.
-$MODEL_REPO     = 'unsloth/Qwen3.5-9B-GGUF'
-$MODEL_FILE     = 'Qwen3.5-9B-Q4_K_M.gguf'
+# Qwen3.5 dense GGUF — pick 9B (default) or 4B (lighter, for slower
+# machines). The original spec said "Qwen3.5 8B" but the published
+# dense sizes are 4B / 9B / 27B; we ship those two.
+$MODEL_TABLE = @{
+    '9B' = @{ Repo = 'unsloth/Qwen3.5-9B-GGUF'; File = 'Qwen3.5-9B-Q4_K_M.gguf'; SizeMB = 5400 }
+    '4B' = @{ Repo = 'unsloth/Qwen3.5-4B-GGUF'; File = 'Qwen3.5-4B-Q4_K_M.gguf'; SizeMB = 2400 }
+}
+$MODEL_REPO     = $MODEL_TABLE[$Model].Repo
+$MODEL_FILE     = $MODEL_TABLE[$Model].File
+$MODEL_MIN_MB   = [int]($MODEL_TABLE[$Model].SizeMB * 0.8)  # sanity floor
 
 # VOICEVOX 0.25.1 ships windows-cpu as a single-part 7z named .7z.001.
 # 7-Zip handles the .001 entry point natively.
@@ -334,7 +342,7 @@ if ($SkipModel) {
     $sizeMb = [math]::Round((Get-Item $modelPath).Length / 1MB)
     Write-Skip "$MODEL_FILE already at $modelPath ($sizeMb MB)"
 } else {
-    Write-Host "  downloading $MODEL_REPO/$MODEL_FILE (~5GB) via hf-cli" -ForegroundColor DarkGray
+    Write-Host "  downloading $MODEL_REPO/$MODEL_FILE via hf-cli" -ForegroundColor DarkGray
     if (-not (Test-Command uv)) { Fail 'uv not on PATH; cannot drive hf download.' }
     # `huggingface-cli download` is deprecated; the new entry point is
     # `hf download`. We pass an absolute --local-dir so the file lands
@@ -348,8 +356,8 @@ if ($SkipModel) {
         Fail "model file missing after hf download (expected $modelPath)."
     }
     $sizeMb = [math]::Round((Get-Item $modelPath).Length / 1MB)
-    if ($sizeMb -lt 1000) {
-        Fail "model file is suspiciously small ($sizeMb MB) — refusing to continue."
+    if ($sizeMb -lt $MODEL_MIN_MB) {
+        Fail "model file is suspiciously small ($sizeMb MB < expected ~$($MODEL_TABLE[$Model].SizeMB) MB) — refusing to continue."
     }
     Write-Ok "model downloaded ($sizeMb MB)"
 }

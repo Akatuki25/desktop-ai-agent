@@ -33,9 +33,18 @@ class LlamaServerBackend:
         self._transport = transport
 
     def _make_client(self) -> httpx.AsyncClient:
+        # Streaming SSE: connect/write/pool stay bounded, but read=None so a
+        # slow first token (cold model load, large prompt eval on weak HW)
+        # doesn't trip ReadTimeout. timeout_s still caps connect/write/pool.
+        timeout = httpx.Timeout(
+            connect=self.timeout_s,
+            read=None,
+            write=self.timeout_s,
+            pool=self.timeout_s,
+        )
         if self._transport is not None:
-            return httpx.AsyncClient(transport=self._transport, timeout=self.timeout_s)
-        return httpx.AsyncClient(timeout=self.timeout_s)
+            return httpx.AsyncClient(transport=self._transport, timeout=timeout)
+        return httpx.AsyncClient(timeout=timeout)
 
     async def chat_stream(
         self,
