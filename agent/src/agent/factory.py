@@ -26,6 +26,8 @@ from agent.tools.ask_user import AskUserTool
 from agent.tools.memory_tools import MemorySearchTool, MemoryUpsertTool
 from agent.tools.schedule_tools import ScheduleRegisterTool
 from agent.tools.web_tools import WebFetchTool, WebOpenTool, WebSearchTool
+from agent.voice.pipeline import VoicePipeline
+from agent.voice.stt_deepgram import DeepgramSTT
 from agent.voice.tts_voicevox import VoicevoxTTS
 
 _DEFAULT_PERSONA = "ずんだもん — 東北地方のずんだ餅の精霊。明るく元気で好奇心旺盛。"
@@ -122,7 +124,19 @@ def build_app(token: str, *, settings: Settings | None = None) -> FastAPI:
         tts=tts,
     )
 
-    app = create_app(token=token, turn_loop=turn_loop)
+    # Voice (STT) — only wire if a Deepgram key is configured. Without
+    # it the daemon still serves text mode normally.
+    voice_pipeline: VoicePipeline | None = None
+    if settings.deepgram_api_key:
+        stt = DeepgramSTT(api_key=settings.deepgram_api_key)
+        voice_pipeline = VoicePipeline(stt=stt, turn_loop=turn_loop)
+        sys.stderr.write("[factory] Deepgram STT enabled\n")
+    else:
+        sys.stderr.write(
+            "[factory] STT disabled (set DEEPGRAM_API_KEY to enable)\n"
+        )
+
+    app = create_app(token=token, turn_loop=turn_loop, voice_pipeline=voice_pipeline)
 
     # Scheduler + proactive driver — needs the broadcast function from the
     # server for pushing notifications to all connected WS clients.

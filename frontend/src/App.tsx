@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveSprite } from "./features/character/spriteMap";
 import { playWav } from "./features/voice/ttsPlayer";
+import { VoiceButton } from "./features/voice/VoiceButton";
 import { resolveDaemonInfo, type DaemonInfo } from "./rpc/bootstrap";
 import { createRpcClient, type RpcClient, type RpcEvent } from "./rpc/client";
 import {
   useCharacterStore,
   useConnectionStore,
+  useVoiceStore,
   type Emotion,
 } from "./store";
 
@@ -154,6 +156,9 @@ export function App() {
       setReplyPending(false);
       setToolStatus("");
       scheduleHide();
+    } else if (evt.method === "voice.stt_partial") {
+      const p = evt.params as { text?: string };
+      useVoiceStore.getState().setPartialText(p.text ?? "");
     } else if (evt.method === "notification.proactive") {
       const p = evt.params as { text?: string };
       setReplyText(p.text ?? "");
@@ -365,25 +370,51 @@ export function App() {
 
       {status === "open" && (
         <div style={{ padding: "4px 10px 8px" }}>
-          <input
-            aria-label="message"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && send()}
-            placeholder="話しかける..."
-            style={{
-              width: "100%",
-              border: "1px solid rgba(0,0,0,0.15)",
-              borderRadius: 8,
-              padding: "6px 10px",
-              fontSize: 13,
-              background: "rgba(255,255,255,0.9)",
-              outline: "none",
-              boxSizing: "border-box",
-            }}
-          />
+          <VoiceCaptionPreview />
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <input
+              aria-label="message"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && send()}
+              placeholder="話しかける..."
+              style={{
+                flex: 1,
+                minWidth: 0,
+                border: "1px solid rgba(0,0,0,0.15)",
+                borderRadius: 8,
+                padding: "6px 10px",
+                fontSize: 13,
+                background: "rgba(255,255,255,0.9)",
+                outline: "none",
+                boxSizing: "border-box",
+              }}
+            />
+            <VoiceButton client={client} />
+          </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function VoiceCaptionPreview() {
+  const partial = useVoiceStore((s) => s.partialText);
+  if (!partial) return null;
+  return (
+    <div
+      style={{
+        fontSize: 11,
+        color: "rgba(0,0,0,0.5)",
+        fontStyle: "italic",
+        marginBottom: 4,
+        padding: "0 4px",
+        whiteSpace: "nowrap",
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+      }}
+    >
+      {partial}
     </div>
   );
 }

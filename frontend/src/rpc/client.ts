@@ -19,6 +19,7 @@ export interface RpcEvent {
 
 export interface RpcClient {
   send(method: string, params: unknown): void;
+  sendBinary(data: ArrayBuffer): void;
   close(): void;
 }
 
@@ -57,6 +58,10 @@ export function createRpcClient(opts: RpcClientOptions): RpcClient {
     send(method, params) {
       if (ws.readyState !== WebSocket.OPEN) return;
       ws.send(JSON.stringify({ jsonrpc: "2.0", id: nextId++, method, params }));
+    },
+    sendBinary(data) {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      ws.send(data);
     },
     close() {
       ws.close();
