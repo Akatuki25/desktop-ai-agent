@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveSprite } from "./features/character/spriteMap";
-import { playWav } from "./features/voice/ttsPlayer";
+import { cancelPlayback, playWav } from "./features/voice/ttsPlayer";
 import { VoiceButton } from "./features/voice/VoiceButton";
 import { resolveDaemonInfo, type DaemonInfo } from "./rpc/bootstrap";
 import { createRpcClient, type RpcClient, type RpcEvent } from "./rpc/client";
@@ -159,6 +159,16 @@ export function App() {
     } else if (evt.method === "voice.stt_partial") {
       const p = evt.params as { text?: string };
       useVoiceStore.getState().setPartialText(p.text ?? "");
+    } else if (evt.method === "agent.interrupt") {
+      // Barge-in: user started talking over the agent. Silence whatever
+      // TTS is playing/queued and clear the on-screen reply so the
+      // incoming response from the new utterance starts fresh.
+      cancelPlayback();
+      character.setAgentState("idle");
+      setReplyText("");
+      setReplyPending(false);
+      setToolStatus("");
+      clearHide();
     } else if (evt.method === "notification.proactive") {
       const p = evt.params as { text?: string };
       setReplyText(p.text ?? "");

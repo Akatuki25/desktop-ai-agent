@@ -5,23 +5,26 @@ dependency footprint stays at the websockets package we already
 have. The expected audio format is 16-bit PCM little-endian, 16 kHz,
 mono — that's what the frontend's micCapture produces.
 
-The class owns three things:
-    1. an outgoing connection that we feed PCM into
-    2. a background task that reads JSON results and pushes them
-       to a caller-supplied callback
-    3. an explicit stop() that closes both halves cleanly
+The class exposes 3 callback hooks so the upstream VoicePipeline can
+build a barge-in-capable conversational loop without touching JSON:
+    - on_transcript(text, is_final): live captions + final segments
+    - on_speech_started(): user started talking → cancel any in-flight
+      reply (barge-in)
+    - on_utterance_end(): user finished a thought → fire the turn
 
-Deepgram's WS protocol (relevant subset):
+Deepgram emits SpeechStarted / UtteranceEnd natively when we set
+`vad_events=true` and `utterance_end_ms=<N>` on the connect URL,
+which removes any need for client-side VAD heuristics.
+
+Wire protocol (relevant subset):
     - send raw audio bytes as binary frames
-    - receive JSON like
-        {"type": "Results",
-         "is_final": true,
-         "channel": {"alternatives": [{"transcript": "...", ...}]}}
+    - receive JSON
+        {"type":"Results", "is_final": true,
+         "speech_final": true,
+         "channel":{"alternatives":[{"transcript":"..."}]}}
+        {"type":"SpeechStarted", "timestamp": ...}
+        {"type":"UtteranceEnd", "last_word_end": ...}
     - send {"type": "CloseStream"} to flush and close
-
-We accept partial (interim) results so the UI can render live
-captions while the user is still talking; the caller distinguishes
-final from interim via the is_final flag.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ import websockets
 from websockets.asyncio.client import ClientConnection
 
 TranscriptCallback = Callable[[str, bool], Awaitable[None]]
+EventCallback = Callable[[], Awaitable[None]]
 
 
 class DeepgramSTT:
@@ -47,6 +51,7 @@ class DeepgramSTT:
         language: str = "ja",
         model: str = "nova-2",
         sample_rate: int = 16000,
+        utterance_end_ms: int = 1000,
     ) -> None:
         if not api_key:
             raise ValueError("Deepgram API key is required")
@@ -54,14 +59,20 @@ class DeepgramSTT:
         self._language = language
         self._model = model
         self._sample_rate = sample_rate
+        self._utterance_end_ms = utterance_end_ms
         self._ws: ClientConnection | None = None
         self._reader: asyncio.Task[None] | None = None
-        self._callback: TranscriptCallback | None = None
+        self._on_transcript: TranscriptCallback | None = None
+        self._on_speech_started: EventCallback | None = None
+        self._on_utterance_end: EventCallback | None = None
 
     @property
     def _url(self) -> str:
         # linear16 = signed 16-bit PCM little-endian, which is what the
-        # frontend's Float32→Int16 conversion produces.
+        # frontend's Float32→Int16 conversion produces. vad_events +
+        # utterance_end_ms make Deepgram emit SpeechStarted /
+        # UtteranceEnd, which is what enables natural turn-taking and
+        # barge-in without any local VAD.
         return (
             "wss://api.deepgram.com/v1/listen"
             f"?language={self._language}"
@@ -71,12 +82,22 @@ class DeepgramSTT:
             "&encoding=linear16"
             "&punctuate=true"
             "&interim_results=true"
+            "&vad_events=true"
+            f"&utterance_end_ms={self._utterance_end_ms}"
         )
 
-    async def start(self, callback: TranscriptCallback) -> None:
+    async def start(
+        self,
+        callback: TranscriptCallback,
+        *,
+        on_speech_started: EventCallback | None = None,
+        on_utterance_end: EventCallback | None = None,
+    ) -> None:
         if self._ws is not None:
             return  # already running
-        self._callback = callback
+        self._on_transcript = callback
+        self._on_speech_started = on_speech_started
+        self._on_utterance_end = on_utterance_end
         self._ws = await websockets.connect(
             self._url,
             additional_headers={"Authorization": f"Token {self._api_key}"},
@@ -97,7 +118,9 @@ class DeepgramSTT:
         reader = self._reader
         self._ws = None
         self._reader = None
-        self._callback = None
+        self._on_transcript = None
+        self._on_speech_started = None
+        self._on_utterance_end = None
         if ws is None:
             return
         # Tell Deepgram to flush and finalize.
@@ -126,24 +149,42 @@ class DeepgramSTT:
                     msg: dict[str, Any] = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
-                if msg.get("type") != "Results":
-                    continue
-                channel = msg.get("channel") or {}
-                alts = channel.get("alternatives") or []
-                if not alts:
-                    continue
-                transcript = (alts[0].get("transcript") or "").strip()
-                if not transcript:
-                    continue
-                is_final = bool(msg.get("is_final"))
-                cb = self._callback
-                if cb is None:
-                    continue
-                try:
-                    await cb(transcript, is_final)
-                except Exception as e:
-                    sys.stderr.write(f"[stt] callback error: {e}\n")
+                msg_type = msg.get("type")
+                if msg_type == "Results":
+                    await self._handle_results(msg)
+                elif msg_type == "SpeechStarted":
+                    await self._fire(self._on_speech_started, "speech_started")
+                elif msg_type == "UtteranceEnd":
+                    await self._fire(self._on_utterance_end, "utterance_end")
+                # Ignore Metadata, Open, Close, etc.
         except websockets.ConnectionClosed:
             return
         except Exception as e:
             sys.stderr.write(f"[stt] read loop error: {e}\n")
+
+    async def _handle_results(self, msg: dict[str, Any]) -> None:
+        channel = msg.get("channel") or {}
+        alts = channel.get("alternatives") or []
+        if not alts:
+            return
+        transcript = (alts[0].get("transcript") or "").strip()
+        if not transcript:
+            return
+        is_final = bool(msg.get("is_final"))
+        cb = self._on_transcript
+        if cb is None:
+            return
+        try:
+            await cb(transcript, is_final)
+        except Exception as e:
+            sys.stderr.write(f"[stt] transcript callback error: {e}\n")
+
+    async def _fire(
+        self, cb: EventCallback | None, label: str
+    ) -> None:
+        if cb is None:
+            return
+        try:
+            await cb()
+        except Exception as e:
+            sys.stderr.write(f"[stt] {label} callback error: {e}\n")

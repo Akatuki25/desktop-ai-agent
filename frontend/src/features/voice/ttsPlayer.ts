@@ -18,6 +18,9 @@
 let audioCtx: AudioContext | null = null;
 let nextStartTime = 0;
 let lastSeq = -1;
+// Track every scheduled source so cancel() can stop both currently
+// playing chunks AND the ones queued ahead of `currentTime`.
+const scheduled = new Set<AudioBufferSourceNode>();
 
 function getAudioContext(): AudioContext {
   if (!audioCtx) {
@@ -46,4 +49,33 @@ export async function playWav(wavBytes: ArrayBuffer, seq?: number): Promise<void
   source.start(nextStartTime);
   nextStartTime += buffer.duration;
   if (seq !== undefined) lastSeq = seq;
+
+  scheduled.add(source);
+  source.onended = () => {
+    scheduled.delete(source);
+  };
+}
+
+/**
+ * Cut off all currently playing and queued TTS chunks. Used for
+ * barge-in: when the daemon broadcasts `agent.interrupt`, we must
+ * silence whatever was already in the AudioContext's playback queue,
+ * not just stop sending new ones.
+ */
+export function cancelPlayback(): void {
+  for (const source of scheduled) {
+    try {
+      source.stop(0);
+    } catch {
+      // Already stopped or not yet started — both are fine.
+    }
+    source.disconnect();
+  }
+  scheduled.clear();
+  // Reset so the next chunk after cancel starts at "now" rather than
+  // resuming at the abandoned timeline position.
+  if (audioCtx) {
+    nextStartTime = audioCtx.currentTime;
+  }
+  lastSeq = -1;
 }

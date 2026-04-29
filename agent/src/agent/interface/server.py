@@ -33,8 +33,10 @@ class TurnLoopLike(Protocol):
 class VoicePipelineLike(Protocol):
     async def start_session(self) -> None: ...
     async def feed_audio(self, pcm: bytes) -> None: ...
-    def stop_session(self) -> AsyncIterator[Any]: ...
+    async def stop_session(self) -> None: ...
     def set_partial_callback(self, cb: Any) -> None: ...
+    def set_event_callback(self, cb: Any) -> None: ...
+    def set_interrupt_callback(self, cb: Any) -> None: ...
 
 
 def _extract_token(ws: WebSocket) -> str | None:
@@ -165,7 +167,24 @@ async def _dispatch(
         async def _on_partial(text: str) -> None:
             await _send_event(ws, "voice.stt_partial", {"text": text})
 
+        # Voice mode is continuous: Deepgram's UtteranceEnd fires turns
+        # automatically, and SpeechStarted (barge-in) cancels them. Each
+        # turn's events flow through this callback in the same wire
+        # format the text path uses.
+        tts_seq = [0]
+
+        async def _on_event(evt: Any) -> None:
+            await _emit_turn_event(ws, evt, tts_seq)
+
+        async def _on_interrupt() -> None:
+            # Reset the per-turn TTS seq so the next chunk is treated as
+            # the start of a new turn by the frontend's playback queue.
+            tts_seq[0] = 0
+            await _send_event(ws, "agent.interrupt", {})
+
         voice_pipeline.set_partial_callback(_on_partial)
+        voice_pipeline.set_event_callback(_on_event)
+        voice_pipeline.set_interrupt_callback(_on_interrupt)
         await voice_pipeline.start_session()
         if req_id is not None:
             await ws.send_json({"jsonrpc": "2.0", "id": req_id, "result": {"ok": True}})
@@ -175,11 +194,10 @@ async def _dispatch(
         if voice_pipeline is None:
             await _send_method_error(ws, req_id, "voice pipeline not configured")
             return
-        # stop_session yields TurnEvents from the LLM turn the final
-        # transcript triggered. Stream them through the same path text
-        # uses so TTS, tool calls, persistence all just work.
-        await _stream_turn_events(ws, voice_pipeline.stop_session())
+        await voice_pipeline.stop_session()
         voice_pipeline.set_partial_callback(None)
+        voice_pipeline.set_event_callback(None)
+        voice_pipeline.set_interrupt_callback(None)
         if req_id is not None:
             await ws.send_json({"jsonrpc": "2.0", "id": req_id, "result": {"ok": True}})
         return
@@ -198,43 +216,49 @@ async def _stream_turn_events(
     ws: WebSocket,
     events: AsyncIterator[Any],
 ) -> None:
-    """Pump TurnEvents to the WS in the canonical wire format. Used by
-    both session.send_text and voice.stop so they're indistinguishable
-    from the client's perspective once the user's input lands."""
+    """Pump TurnEvents from a sync turn (session.send_text) to the WS.
+    Voice-mode auto-fired turns reuse `_emit_turn_event` directly via the
+    pipeline's event callback, so the wire format stays identical."""
     tts_seq_counter = [0]
     async for evt in events:
-        if evt.kind == "delta":
-            await _send_say(ws, evt.text, is_thinking=evt.is_thinking)
-        elif evt.kind == "end":
-            await _send_event(ws, "agent.say_end", {"message_id": evt.message_id})
-        elif evt.kind == "tool_request":
-            await _send_event(
-                ws,
-                "tool.request_confirm",
-                {
-                    "call_id": evt.call_id,
-                    "tool": evt.tool_name,
-                    "args": evt.arguments,
-                    "risk": evt.risk,
-                    "requires_confirmation": evt.requires_confirmation,
-                },
-            )
-        elif evt.kind == "tool_result":
-            await _send_event(
-                ws,
-                "tool.result",
-                {
-                    "call_id": evt.call_id,
-                    "ok": evt.ok,
-                    "summary": evt.summary,
-                },
-            )
-        elif evt.kind == "tts":
-            # Binary frame: tag (0x02) + seq (8B BE u64) + WAV.
-            seq = tts_seq_counter[0]
-            tts_seq_counter[0] += 1
-            tag = b"\x02" + seq.to_bytes(8, "big") + evt.audio_wav
-            await ws.send_bytes(tag)
+        await _emit_turn_event(ws, evt, tts_seq_counter)
+
+
+async def _emit_turn_event(
+    ws: WebSocket, evt: Any, tts_seq_counter: list[int]
+) -> None:
+    if evt.kind == "delta":
+        await _send_say(ws, evt.text, is_thinking=evt.is_thinking)
+    elif evt.kind == "end":
+        await _send_event(ws, "agent.say_end", {"message_id": evt.message_id})
+    elif evt.kind == "tool_request":
+        await _send_event(
+            ws,
+            "tool.request_confirm",
+            {
+                "call_id": evt.call_id,
+                "tool": evt.tool_name,
+                "args": evt.arguments,
+                "risk": evt.risk,
+                "requires_confirmation": evt.requires_confirmation,
+            },
+        )
+    elif evt.kind == "tool_result":
+        await _send_event(
+            ws,
+            "tool.result",
+            {
+                "call_id": evt.call_id,
+                "ok": evt.ok,
+                "summary": evt.summary,
+            },
+        )
+    elif evt.kind == "tts":
+        # Binary frame: tag (0x02) + seq (8B BE u64) + WAV.
+        seq = tts_seq_counter[0]
+        tts_seq_counter[0] += 1
+        tag = b"\x02" + seq.to_bytes(8, "big") + evt.audio_wav
+        await ws.send_bytes(tag)
 
 
 async def _send_method_error(
