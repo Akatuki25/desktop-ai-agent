@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveSprite } from "./features/character/spriteMap";
-import { cancelPlayback, playWav } from "./features/voice/ttsPlayer";
+import { cancelPlayback, playWav, setOnPlaybackDrained } from "./features/voice/ttsPlayer";
 import { VoiceButton } from "./features/voice/VoiceButton";
 import { resolveDaemonInfo, type DaemonInfo } from "./rpc/bootstrap";
 import { createRpcClient, type RpcClient, type RpcEvent } from "./rpc/client";
@@ -207,9 +207,20 @@ export function App() {
         },
       });
       setClient(cur);
+      // Half-duplex: when our TTS playback queue fully drains, tell
+      // the daemon so it releases its STT gate. Done via the same RPC
+      // client that handles every other message.
+      setOnPlaybackDrained(() => {
+        try {
+          cur?.send("voice.tts_done", {});
+        } catch {
+          // ignore — connection may be closing
+        }
+      });
     })();
     return () => {
       cancelled = true;
+      setOnPlaybackDrained(null);
       cur?.close();
     };
   }, [setStatus, handleEvent]);

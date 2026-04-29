@@ -22,6 +22,42 @@ let lastSeq = -1;
 // playing chunks AND the ones queued ahead of `currentTime`.
 const scheduled = new Set<AudioBufferSourceNode>();
 
+// Half-duplex: the daemon mutes STT while it's replying and waits for
+// the client to confirm playback has fully drained (no chunks queued,
+// no chunks playing). This callback fires at that moment so App.tsx
+// can send `voice.tts_done` back to the daemon.
+let onPlaybackDrained: (() => void) | null = null;
+// Set to true when at least one chunk was scheduled in the current
+// reply burst — without this we'd fire onPlaybackDrained from idle
+// (e.g. on first cancelPlayback) when there was nothing to drain.
+let hasPendingPlayback = false;
+let drainCheckScheduled = false;
+
+export function setOnPlaybackDrained(cb: (() => void) | null): void {
+  onPlaybackDrained = cb;
+}
+
+function maybeFireDrained(): void {
+  if (drainCheckScheduled) return;
+  drainCheckScheduled = true;
+  // Microtask defer — gives a just-arrived next chunk a chance to
+  // re-enter `scheduled` so we don't fire spuriously between
+  // sentence-boundary chunks.
+  queueMicrotask(() => {
+    drainCheckScheduled = false;
+    if (scheduled.size > 0) return;
+    if (!hasPendingPlayback) return;
+    hasPendingPlayback = false;
+    if (onPlaybackDrained) {
+      try {
+        onPlaybackDrained();
+      } catch {
+        // swallow
+      }
+    }
+  });
+}
+
 function getAudioContext(): AudioContext {
   if (!audioCtx) {
     audioCtx = new AudioContext();
@@ -51,8 +87,12 @@ export async function playWav(wavBytes: ArrayBuffer, seq?: number): Promise<void
   if (seq !== undefined) lastSeq = seq;
 
   scheduled.add(source);
+  hasPendingPlayback = true;
   source.onended = () => {
     scheduled.delete(source);
+    if (scheduled.size === 0) {
+      maybeFireDrained();
+    }
   };
 }
 
@@ -78,4 +118,9 @@ export function cancelPlayback(): void {
     nextStartTime = audioCtx.currentTime;
   }
   lastSeq = -1;
+  // Treat this like a clean drain so the daemon releases its STT gate.
+  if (hasPendingPlayback) {
+    hasPendingPlayback = false;
+    maybeFireDrained();
+  }
 }

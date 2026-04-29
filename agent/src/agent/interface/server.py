@@ -37,6 +37,7 @@ class VoicePipelineLike(Protocol):
     def set_partial_callback(self, cb: Any) -> None: ...
     def set_event_callback(self, cb: Any) -> None: ...
     def set_interrupt_callback(self, cb: Any) -> None: ...
+    def notify_tts_done(self) -> None: ...
 
 
 def _extract_token(ws: WebSocket) -> str | None:
@@ -198,6 +199,16 @@ async def _dispatch(
         voice_pipeline.set_partial_callback(None)
         voice_pipeline.set_event_callback(None)
         voice_pipeline.set_interrupt_callback(None)
+        if req_id is not None:
+            await ws.send_json({"jsonrpc": "2.0", "id": req_id, "result": {"ok": True}})
+        return
+
+    if method == "voice.tts_done":
+        # Half-duplex release: client tells us its TTS playback queue
+        # has drained, so it's safe to start listening to the user
+        # again without catching the tail of our own audio.
+        if voice_pipeline is not None:
+            voice_pipeline.notify_tts_done()
         if req_id is not None:
             await ws.send_json({"jsonrpc": "2.0", "id": req_id, "result": {"ok": True}})
         return

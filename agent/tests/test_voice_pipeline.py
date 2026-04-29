@@ -355,9 +355,11 @@ async def test_pipeline_utterance_end_with_no_final_is_noop() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pipeline_speech_started_cancels_in_flight_turn() -> None:
-    """Barge-in: once the user starts a new utterance, the in-flight
-    reply is cancelled and the interrupt callback fires."""
+async def test_pipeline_speech_started_ignored_during_half_duplex() -> None:
+    """Half-duplex: once a turn is firing the mic gate is up, so even
+    if Deepgram emits a SpeechStarted (e.g. from already-buffered echo
+    of the agent's own voice), the interrupt path does NOT fire and
+    the in-flight turn is not cancelled."""
     stt = _FakeSTT()
     turn_loop = _SlowTurnLoop()
     pipeline = VoicePipeline(stt=stt, turn_loop=turn_loop)  # type: ignore[arg-type]
@@ -376,7 +378,6 @@ async def test_pipeline_speech_started_cancels_in_flight_turn() -> None:
     pipeline.set_interrupt_callback(on_interrupt)
     await pipeline.start_session()
 
-    # First utterance fires a turn.
     await stt.emit("hi", is_final=True)
     await stt.emit_utterance_end()
     # Wait until the slow turn has emitted its first delta.
@@ -386,15 +387,83 @@ async def test_pipeline_speech_started_cancels_in_flight_turn() -> None:
         await asyncio.sleep(0.01)
     assert events and events[0].kind == "delta"
 
-    # User starts talking again → barge-in.
+    # Echo SpeechStarted while the agent is talking → swallowed.
     await stt.emit_speech_started()
-    # Give the cancel + interrupt callback time to land.
     await asyncio.sleep(0.05)
 
-    assert interrupts == 1
-    assert not turn_loop.completed
-    # No "end" event should have arrived because the turn was cancelled.
-    assert all(e.kind != "end" for e in events)
+    assert interrupts == 0
+    # Turn task is still running (slow loop is mid-sleep).
+    assert pipeline._current_turn is not None  # noqa: SLF001
+    assert not pipeline._current_turn.done()  # noqa: SLF001
+
+    await pipeline.stop_session()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_drops_audio_during_agent_reply() -> None:
+    """While the agent is replying the mic gate is up — feed_audio
+    must not forward PCM to Deepgram."""
+    stt = _FakeSTT()
+    turn_loop = _SlowTurnLoop()
+    pipeline = VoicePipeline(stt=stt, turn_loop=turn_loop)  # type: ignore[arg-type]
+
+    async def on_event(evt: Any) -> None:
+        pass
+
+    pipeline.set_event_callback(on_event)
+    await pipeline.start_session()
+
+    # Pre-turn: audio is forwarded normally.
+    await pipeline.feed_audio(b"\x01")
+    assert stt.fed == [b"\x01"]
+
+    # Fire a turn.
+    await stt.emit("hi", is_final=True)
+    await stt.emit_utterance_end()
+    # Wait until the gate engages (set in _on_utterance_end before
+    # create_task, so it's already true here).
+    assert pipeline._agent_audio_pending  # noqa: SLF001
+
+    await pipeline.feed_audio(b"\x02")
+    await pipeline.feed_audio(b"\x03")
+    # No new bytes reached Deepgram while the gate was up.
+    assert stt.fed == [b"\x01"]
+
+    # Client signals playback drained → gate releases → audio resumes.
+    pipeline.notify_tts_done()
+    await pipeline.feed_audio(b"\x04")
+    assert stt.fed == [b"\x01", b"\x04"]
+
+    await pipeline.stop_session()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_releases_gate_when_turn_emits_no_tts() -> None:
+    """Text-only replies (no TTS chunks) must release the gate without
+    waiting for a tts_done that will never arrive."""
+    stt = _FakeSTT()
+    turn_loop = _FakeTurnLoop(reply="hello")  # _FakeTurnLoop emits delta + end, no TTS
+    pipeline = VoicePipeline(stt=stt, turn_loop=turn_loop)  # type: ignore[arg-type]
+
+    events: list[Any] = []
+
+    async def on_event(evt: Any) -> None:
+        events.append(evt)
+
+    pipeline.set_event_callback(on_event)
+    await pipeline.start_session()
+
+    await stt.emit("hi", is_final=True)
+    await stt.emit_utterance_end()
+    for _ in range(50):
+        if any(e.kind == "end" for e in events):
+            break
+        await asyncio.sleep(0.01)
+
+    # Gate auto-cleared because no TTS was emitted.
+    assert not pipeline._agent_audio_pending  # noqa: SLF001
+    await pipeline.feed_audio(b"\xaa")
+    assert b"\xaa" in stt.fed
 
     await pipeline.stop_session()
 
