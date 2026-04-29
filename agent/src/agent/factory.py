@@ -7,6 +7,8 @@ FastAPI app in one call.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import os
 import sys
 from pathlib import Path
@@ -25,6 +27,7 @@ from agent.tools import ToolRegistry
 from agent.tools.ask_user import AskUserTool
 from agent.tools.memory_tools import MemorySearchTool, MemoryUpsertTool
 from agent.tools.schedule_tools import ScheduleRegisterTool
+from agent.tools.session_tools import SessionCloseTool
 from agent.tools.web_tools import WebFetchTool, WebOpenTool, WebSearchTool
 from agent.voice.pipeline import VoicePipeline
 from agent.voice.stt_deepgram import DeepgramSTT
@@ -114,9 +117,15 @@ def build_app(token: str, *, settings: Settings | None = None) -> FastAPI:
     if tts is None:
         sys.stderr.write("[factory] TTS disabled (no VOICEVOX)\n")
 
+    # Single SessionManager instance shared by TurnLoop, the session.close
+    # tool, and the idle watcher / shutdown hook below — they must all see
+    # the same _last_activity dict.
+    session_manager = SessionManager(repo, llm)
+    registry.register(SessionCloseTool(session_manager))
+
     turn_loop = TurnLoop(
         sessions=repo,
-        session_manager=SessionManager(repo, llm),
+        session_manager=session_manager,
         core_memory=core,
         behavior=behavior,
         llm=llm,
@@ -156,6 +165,32 @@ def build_app(token: str, *, settings: Settings | None = None) -> FastAPI:
     async def _stop_scheduler() -> None:
         scheduler.stop()
 
+    @app.on_event("startup")
+    async def _start_idle_watcher() -> None:
+        app.state.idle_watcher_task = asyncio.create_task(
+            session_manager.run_idle_watcher()
+        )
+
+    @app.on_event("shutdown")
+    async def _stop_idle_watcher_and_close() -> None:
+        task: asyncio.Task[None] | None = getattr(
+            app.state, "idle_watcher_task", None
+        )
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        # Final flush: summarize whatever chat was open when the daemon
+        # quit so the conversation isn't lost. llama-server is still up
+        # at this point (__main__.py kills it after uvicorn returns).
+        try:
+            await session_manager.close_current()
+        except Exception as e:
+            sys.stderr.write(
+                f"[factory] close_current at shutdown failed: {e}\n"
+            )
+
     app.state.scheduler = scheduler
+    app.state.session_manager = session_manager
 
     return app

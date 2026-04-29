@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- macOS 10.14+ requires this key whenever WKWebView calls
+         getUserMedia({audio:true}). Without it the OS silently denies
+         the permission and the JS promise rejects with NotAllowedError,
+         which makes the mic button look frozen. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>音声入力 (Speech-to-Text) のためマイクを使用します。</string>
+</dict>
+</plist>

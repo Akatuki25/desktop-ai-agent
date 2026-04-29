@@ -2,6 +2,8 @@
 
 Windows 10/11 向け。**root を最大限汚さない** 方針で、自動化できる部分は `scripts/setup.ps1` 1 本にまとめてある。
 
+macOS 用は [`docs/setup-macos.md`](./setup-macos.md) を参照 (`scripts/setup.sh` / `scripts/activate.sh` / `scripts/verify.sh`)。
+
 このドキュメントは `main` ブランチでの実動作で検証済み。
 
 ## TL;DR

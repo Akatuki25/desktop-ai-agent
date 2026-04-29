@@ -5,9 +5,10 @@
 //! port, then expose that + the shared auth token to the frontend via
 //! the `daemon_info` command.
 //!
-//! The daemon is resolved in dev mode by looking for
-//! `<repo>/agent/.venv/Scripts/python.exe` relative to this crate's
-//! manifest dir. Production bundling will bring its own path later.
+//! The daemon is resolved in dev mode by looking inside
+//! `<repo>/agent/.venv/` relative to this crate's manifest dir
+//! (`Scripts/python.exe` on Windows, `bin/python` elsewhere).
+//! Production bundling will bring its own path later.
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -32,17 +33,27 @@ fn daemon_info(state: tauri::State<DaemonInfo>) -> DaemonInfo {
 
 fn resolve_python() -> PathBuf {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let dev_venv = manifest
-        .join("..")
-        .join("..")
-        .join("agent")
-        .join(".venv")
-        .join("Scripts")
-        .join("python.exe");
-    if dev_venv.exists() {
-        return dev_venv;
+    let venv = manifest.join("..").join("..").join("agent").join(".venv");
+
+    #[cfg(target_os = "windows")]
+    let candidates = [venv.join("Scripts").join("python.exe")];
+    #[cfg(not(target_os = "windows"))]
+    let candidates = [venv.join("bin").join("python"), venv.join("bin").join("python3")];
+
+    for c in candidates.iter() {
+        if c.exists() {
+            return c.clone();
+        }
     }
-    PathBuf::from("python")
+
+    #[cfg(target_os = "windows")]
+    {
+        PathBuf::from("python")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        PathBuf::from("python3")
+    }
 }
 
 fn spawn_daemon(token: &str) -> std::io::Result<(u16, Child)> {
@@ -51,10 +62,11 @@ fn spawn_daemon(token: &str) -> std::io::Result<(u16, Child)> {
 
     // Inherit LLAMA_SERVER_URL / LLAMA_SERVER_BIN / LLAMA_MODEL /
     // AGENT_DATA_DIR from the shell that started Tauri (activate.ps1
-    // sets these). std::process::Command already inherits the parent
-    // environment by default on Windows, so no explicit env() calls
-    // are required here — this comment exists only to make the
-    // dependency explicit.
+    // on Windows or activate.sh on macOS/Linux sets these).
+    // std::process::Command inherits the parent environment by
+    // default on every platform, so no explicit env() calls are
+    // required — this comment exists only to make the dependency
+    // explicit.
     let mut child = Command::new(&python)
         .args(["-m", "agent", "--port", "0", "--token", token])
         .stdout(Stdio::piped())
